@@ -1,0 +1,228 @@
+name: Say something about a published layer
+
+# REQ-POSTDEPOSIT-001 clause 4. A yank, an advisory and a support-window
+# correction are the SAME ACT — saying something about a layer after it is
+# published — carried by the same signed document. Three workflows would
+# drift, so there is one, and the act is whatever the document says.
+#
+# The correction goes under the line's OWN tag, `line-status-<line>`. It does
+# NOT touch the layer. The baseline lives as a blob inside a layer's artifact
+# manifest, so reissuing it would re-push that manifest with a different blob
+# digest, changing the manifest digest — the republish REQ-IMMUTABLE-001
+# refuses, reached by a well-intentioned route. Yanking a layer must not
+# require mutating it.
+#
+# Rolling channel only until the root ceremony: signs with the PROVISIONAL
+# realm root: the secret half is this repository's VARVE_COVALENT_KEY, and the
+# public half is committed here as realm-root.pub (varve's release carries the
+# `pulseengine` realm's root, not this one).
+# This repository holds no key material as a file (REQ-PEL-CUSTODY-001).
+
+# Two runs for the same line would both read the published counter, both find
+# the same value, and both push a document claiming to supersede it — one tag
+# ending up with whichever manifest landed second. Serialising per line closes
+# that window.
+concurrency:
+  group: say-line-status-${{ inputs.line }}
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      line:
+        description: "Release line (YYYY.MM), e.g. 2026.09"
+        required: true
+        type: string
+      document:
+        description: >-
+          The complete line-status JSON: line, counter, issued-at, and whatever
+          you are saying — support-until, yanked{}, known-problems[].
+          `varve sign-status` validates it and refuses a yank or an affected id
+          that is not a layer of the line.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  say:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+
+      - name: Install oras
+        uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1
+
+      - name: Read the pins out of layer.toml
+        id: pins
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+          d = tomllib.load(open("layer.toml", "rb"))
+          registry = d["realm"]["registry"]
+          assert registry.startswith("oci://"), registry
+          print(f"varve={d['varve']['version']}")
+          print(f"repo={registry.removeprefix('oci://')}")
+          PY
+          cat "$GITHUB_OUTPUT"
+
+      - name: Fetch and verify the pinned varve release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ steps.pins.outputs.varve }}
+        run: |
+          set -euo pipefail
+          # This repository vendors no varve source. Same treatment the deposit
+          # gives it: signature FIRST, digests second — `sha256sum -c` only
+          # proves the files match a list, and an unverified list proves
+          # nothing about who wrote it.
+          mkdir -p .varve/bin
+          gh release download "$VER" --repo pulseengine/varve -D .varve \
+            -p "varve-$VER-x86_64-unknown-linux-gnu.tar.gz" \
+            -p 'SHA256SUMS.txt' -p 'SHA256SUMS.txt.cosign.bundle'
+          cd .varve
+          cosign verify-blob \
+            --certificate-identity-regexp 'https://github.com/pulseengine/varve/.github/workflows/release.yml@.*' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --bundle SHA256SUMS.txt.cosign.bundle SHA256SUMS.txt
+          sha256sum --ignore-missing -c SHA256SUMS.txt
+          mkdir -p x && tar xzf "varve-$VER-x86_64-unknown-linux-gnu.tar.gz" -C x
+          install -m 0755 x/varve bin/varve
+          ./bin/varve --version
+
+      - name: Write and sanity-check the document
+        env:
+          DOCUMENT: ${{ inputs.document }}
+          LINE: ${{ inputs.line }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$DOCUMENT" > status.json
+          jq . status.json > /dev/null || { echo "::error::document is not valid JSON"; exit 1; }
+          DOC_LINE=$(jq -r '.line // empty' status.json)
+          if [ "$DOC_LINE" != "$LINE" ]; then
+            echo "::error::document says line '$DOC_LINE' but this run is for '$LINE'."
+            echo "::error::A validly-signed document for another line is refused by consumers;"
+            echo "::error::pushing it under this tag would publish something nobody will read."
+            exit 1
+          fi
+          COUNTER=$(jq -r '.counter // empty' status.json)
+          test -n "$COUNTER" || { echo "::error::document has no counter"; exit 1; }
+          echo "COUNTER=$COUNTER" >> "$GITHUB_ENV"
+
+      - name: Refuse a counter that cannot supersede what is published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LINE: ${{ inputs.line }}
+        run: |
+          set -euo pipefail
+          oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin <<< "$GH_TOKEN"
+          REPO="${{ steps.pins.outputs.repo }}"
+          TAG="line-status-$LINE"
+          # Absence is the normal first case, and must be told apart from a
+          # transport failure: `oras repo tags` LISTS what exists, so absence
+          # is established by the tag not appearing rather than by reading
+          # error prose. (Inferring absence from a 404 in a message is how the
+          # publish-check was once fooled by a repo path containing "404".)
+          if ! oras repo tags "$REPO" > tags.txt 2>tags.err; then
+            echo "::error::could not list tags on $REPO — refusing to guess whether a document is already published"
+            cat tags.err
+            exit 1
+          fi
+          if ! grep -qx "$TAG" tags.txt; then
+            echo "no document published for $LINE yet — this is the first"
+            exit 0
+          fi
+          oras manifest fetch "$REPO:$TAG" > published-manifest.json
+          D=$(jq -r '[.layers[] | select(.annotations["eu.pulseengine.varve.role"] == "line-status")][0].digest // empty' published-manifest.json)
+          test -n "$D" || { echo "::error::$TAG carries no line-status layer"; exit 1; }
+          oras blob fetch --output published.dsse "$REPO@$D"
+          # The counter lives in the DSSE payload, base64 in .payload.
+          PUB=$(jq -r '.payload' published.dsse | base64 -d | jq -r '.counter')
+          echo "published counter: $PUB, presented: $COUNTER"
+          if [ "$COUNTER" -le "$PUB" ]; then
+            echo "::error::counter $COUNTER does not supersede the published $PUB."
+            echo "::error::Consumers keep the NEWER of the two documents, so this would be"
+            echo "::error::discarded — silently, from the operator's point of view. Bump it."
+            exit 1
+          fi
+
+      - name: Sign
+        env:
+          VARVE_COVALENT_KEY: ${{ secrets.VARVE_COVALENT_KEY }}
+        run: |
+          set -euo pipefail
+          .varve/bin/varve sign-status \
+            --file status.json \
+            --key <(printf '%s' "$VARVE_COVALENT_KEY") --key-id covalent-1 \
+            --out status.dsse
+
+      - name: Publish under the line's own tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LINE: ${{ inputs.line }}
+        run: |
+          set -euo pipefail
+          oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin <<< "$GH_TOKEN"
+          REPO="${{ steps.pins.outputs.repo }}"
+          oras blob push "$REPO" status.dsse
+          D="sha256:$(sha256sum status.dsse | cut -d' ' -f1)"
+          jq -n --arg d "$D" --argjson s "$(stat -c%s status.dsse)" '{
+            schemaVersion: 2,
+            mediaType: "application/vnd.oci.image.manifest.v1+json",
+            artifactType: "application/vnd.pulseengine.varve.line-status.v1+json",
+            config: { mediaType: "application/vnd.oci.empty.v1+json",
+                      digest: "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                      size: 2 },
+            layers: [ { mediaType: "application/json", digest: $d, size: $s,
+                        annotations: {"eu.pulseengine.varve.role": "line-status"} } ]
+          }' > status-manifest.json
+          oras manifest push "$REPO:line-status-$LINE" status-manifest.json
+
+      - name: Read it back the way a consumer would
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LINE: ${{ inputs.line }}
+        run: |
+          set -euo pipefail
+          # Publishing is not the claim; being READABLE is. Re-fetch through
+          # the same tag a consumer resolves and check the bytes verify against
+          # the realm's PUBLISHED root — not against the key that just signed
+          # them, which would only prove the signer agrees with itself.
+          REPO="${{ steps.pins.outputs.repo }}"
+          oras manifest fetch "$REPO:line-status-$LINE" > rt-manifest.json
+          D=$(jq -r '[.layers[] | select(.annotations["eu.pulseengine.varve.role"] == "line-status")][0].digest' rt-manifest.json)
+          oras blob fetch --output roundtrip.dsse "$REPO@$D"
+          cmp roundtrip.dsse status.dsse
+
+          # `varve status` reports for a PINNED layer, so give it a throwaway
+          # project. Nothing is installed: the document is verified and cached
+          # on its own, which is exactly the consumer path being checked.
+          mkdir -p rt/project
+          printf 'manifest-version = 1\n[toolchain]\nchannel = "rolling"\nlayer = "%s.0"\n' \
+            "$LINE" > rt/project/varve.toml
+          set +e
+          ( cd rt/project && \
+            VARVE_ROOT="$RUNNER_TEMP/rt-root" \
+            VARVE_TRUST_ROOT="$GITHUB_WORKSPACE/realm-root.pub" \
+            "$GITHUB_WORKSPACE/.varve/bin/varve" status \
+              --from-file "$GITHUB_WORKSPACE/roundtrip.dsse" )
+          RC=$?
+          set -e
+          # 0 = read and verified. 3 = read and verified AND the pinned layer
+          # is yanked — which is this workflow WORKING, not failing: a yank
+          # that did not make `status` exit 3 would be the bug. Anything else
+          # (1 = rejected signature, 2 = usage) is a real failure.
+          case "$RC" in
+            0) echo "::notice::published and verified; pinned layer not yanked" ;;
+            3) echo "::notice::published and verified; the yank fires (exit 3), which is the point" ;;
+            *) echo "::error::the published document does not verify against the realm's own published root (exit $RC)"
+               exit 1 ;;
+          esac
+          echo "::notice::line-status for $LINE published at counter $COUNTER and reads back verified"

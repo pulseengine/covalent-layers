@@ -1,0 +1,59 @@
+# What the `covalent` realm carries: NOTHING of its own.
+#
+# THIS FILE IS THE LAYER. It holds no tools. Every payload a consumer gets
+# from it belongs to another realm, signed by another root, and this layer
+# says only one thing: THESE TWO, TOGETHER, ARE A TOOLCHAIN.
+#
+# That is what a composition is for, and why this realm exists. A project
+# building WebAssembly components with the PulseEngine methodology needs both
+# halves — rivet, spar, synth, witness for the traceability side, and
+# wasm-tools, wac, wkg, wit-bindgen-wrpc for the component side. Before this,
+# such a project pinned two realms in two directories and hoped they moved
+# together. Now it pins one layer, and varve walks the graph.
+#
+# WHOSE ROOT SIGNS WHAT, because this is the whole point:
+#
+#   * `covalent`'s root signs THIS layer — the claim that these two layers
+#     belong together, and nothing else.
+#   * `pulseengine`'s root signs its own layer and everything in it.
+#   * `pulseengine-wasm`'s root signs its own.
+#
+# varve verifies each included layer against ITS OWN realm's root, never this
+# one. A composing realm cannot widen trust: it can only assert a pairing, and
+# if either upstream root rejects its layer the composition fails. That is why
+# an [[include]] names a realm and a DIGEST — a tag could drift after signing,
+# and a missing realm would silently fall back to the composing project's root.
+
+[varve]
+# The release whose assembler builds this layer. v0.38.0 is the first that can:
+# it is where `varve install` learned to walk a composition and fetch what it
+# names, so a consumer of THIS layer gets both halves from one command.
+version = "v0.38.0"
+
+[realm]
+name     = "covalent"
+channel  = "rolling"
+registry = "oci://ghcr.io/pulseengine/covalent-layers"
+
+# ── what this layer composes ────────────────────────────────────────────────
+# Each digest is the digest of the included layer's SIGNED MANIFEST. Not a
+# tag: a tag can be moved after this layer is signed, which is the one thing
+# an include exists to prevent.
+
+# The PulseEngine methodology toolchain — rivet, spar, synth, witness, ordeal,
+# loom, meld, kilnd, wsc, varve-producer, the VS Code extensions and the docs.
+[[include]]
+digest = "sha256:b97266c64fce402ade09d0ddd306cbfc0072b1907a147fec5bc8f7287d30ab4c"
+realm  = "pulseengine"
+layer  = "2026.09.12"
+
+# The component-model tools from bytecodealliance, vouched for by PulseEngine.
+# THREE OF ITS FOUR PAYLOADS CARRY NO PROOF OF ORIGIN — wac, wkg and
+# wit-bindgen-wrpc publish neither cosign-signed sums nor build provenance, and
+# each travels with the operator's recorded reason inside the signed layer.
+# Composing that realm means accepting those reasons; read them with
+# `varve inspect` before pinning this layer.
+[[include]]
+digest = "sha256:4bae60c6fa40da216eb2721253d263158d6c5501d3e6c3863b4ce55b6000c9a4"
+realm  = "pulseengine-wasm"
+layer  = "2026.09.0"

@@ -1,0 +1,128 @@
+name: Scan upstream and deposit
+
+# Every 15 minutes: ask each pinned tool's repository for its latest release,
+# and if any moved, bump layer.toml and deposit a new layer — signed, published,
+# with no person in the loop.
+#
+# THAT IS A DELIBERATE CHOICE AND IT REMOVES A CONTROL. varve's own scanner said
+# of its dispatch step: "This is the ONLY automated path to a signature, and the
+# thing that triggers it is a person merging." Here nobody merges. An upstream
+# release becomes an immutable, signed, published layer within fifteen minutes,
+# and a layer id, once spent, cannot be reused — varve has no revocation and no
+# deletion. A wrong upstream release is corrected by depositing another layer
+# and yanking this one, never by taking it back.
+#
+# The controls that survive without a human, and that this workflow depends on:
+#
+#   * `next-layer-id.sh` derives the id and counter from the PUBLISHED record
+#     and refuses if the registry cannot be read or the tag already exists. It
+#     never guesses.
+#   * `varve-producer deposit` verifies every upstream release against its own
+#     repository's cosign identity before staging a byte.
+#   * the deposit sanity-installs and VERIFIES the layer against the realm's
+#     published root before anything is pushed.
+#   * `publish-check` refuses to replace a published id with different bytes.
+#   * `scan-pins.py` fails loud: a repository it cannot query is an error, never
+#     "nothing moved". A silent scanner would freeze the realm while looking
+#     healthy, which is worse than a noisy one.
+#
+# What is NOT protected is the judgement a person was making: whether this
+# particular upstream release should be in the toolchain at all.
+
+concurrency:
+  # One scan at a time, and never cancelled mid-deposit. Two concurrent runs
+  # would both read the same published record, both derive the same next id,
+  # and both try to publish it — the exact collision `next-layer-id.sh` refuses
+  # one at a time but cannot see across runs.
+  group: scan-and-deposit
+  cancel-in-progress: false
+
+on:
+  # DISPATCH ONLY, unlike pulseengine-layers, which runs this on a 15-minute
+  # cron. That realm's maintainer took that decision for its rolling channel
+  # with the cost written down (its DD-030: nobody decides whether a particular
+  # upstream release belongs in the toolchain, and varve has no revocation).
+  # This realm has no such decision recorded yet, and inheriting one by copying
+  # a file is not how it should be taken — so the scan runs when a person asks
+  # for it, and the schedule is added deliberately or not at all.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  scan:
+    name: what moved upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: ask every pinned repository for its latest release, and bump what moved
+        id: scan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # ONE reader and ONE writer of layer.toml. The rewrite used to live
+          # here as an inline heredoc that knew only about `[[tool]]`, while the
+          # scanner read the manifest — two places deciding which sections
+          # exist, and the drift was only visible in a signed layer. It scanned
+          # `[[tool]]` alone, so the `[[crate]]` and `[[docs]]` entries this
+          # realm now carries would have frozen at 0.36.0 with nothing saying
+          # so; and it compared `version` against the latest tag, so the hub
+          # payload `with-device` (0.2.2 from release v0.7.2) was "moved" on
+          # every scan and would have been signed as version v0.7.2.
+          python3 tools/scan-pins.py --apply > moved.tsv
+          if [ -s moved.tsv ]; then
+            echo "moved=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$(wc -l < moved.tsv | tr -d ' ') pin(s) moved upstream"
+            cat moved.tsv
+          else
+            echo "moved=false" >> "$GITHUB_OUTPUT"
+            echo "nothing moved"
+          fi
+
+      - name: commit the bump
+        if: steps.scan.outputs.moved == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add layer.toml
+          git commit -m "$(printf 'Pins moved upstream\n\n%s\n\nDeposited automatically by the 15-minute scanner. No person chose these\nversions; the scanner reports what upstream published and the deposit signs\nwhat the manifest names.' "$(awk -F'\t' '{printf "  %s %s %s: %s -> %s\n", $1, $2, $3, $4, $5}' moved.tsv)")"
+          git push
+
+      - name: what layer id and counter does the published record say
+        if: steps.scan.outputs.moved == 'true'
+        id: next
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Derived from the registry, never guessed. Refuses outright if the
+          # registry cannot be read or the computed tag already exists — which
+          # matters more here than anywhere, because no one is reading the
+          # output before it signs.
+          OUT="$(tools/next-layer-id.sh)"
+          LAYER="$(printf '%s' "$OUT" | cut -f1)"
+          COUNTER="$(printf '%s' "$OUT" | cut -f2)"
+          test -n "$LAYER" && test -n "$COUNTER" || {
+            echo "::error::next-layer-id.sh produced no answer — refusing to deposit"
+            exit 1
+          }
+          echo "layer=$LAYER"     >> "$GITHUB_OUTPUT"
+          echo "counter=$COUNTER" >> "$GITHUB_OUTPUT"
+          echo "::notice::next layer $LAYER, counter $COUNTER"
+
+      - name: deposit
+        if: steps.scan.outputs.moved == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run deposit.yml \
+            -f layer="${{ steps.next.outputs.layer }}" \
+            -f counter="${{ steps.next.outputs.counter }}"
+          echo "::notice::dispatched deposit of ${{ steps.next.outputs.layer }} (counter ${{ steps.next.outputs.counter }})"

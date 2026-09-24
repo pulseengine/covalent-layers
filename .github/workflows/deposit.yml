@@ -1,0 +1,395 @@
+name: Deposit layer
+
+# Assemble and publish one layer of the `covalent` realm.
+#
+# The assembler and the varve binary come from a varve RELEASE, pinned in
+# layer.toml. Nothing is vendored here: the assembler is system-tested in
+# varve (REQ-SYSTEST-002) and that testing is worth nothing to a realm running
+# a copy of it (REQ-PEL-ASSEMBLER-001).
+#
+# The assembler is `varve-producer deposit --manifest layer.toml`. It reads
+# THIS repository's layer.toml directly — there is no env-var adapter, and
+# there must not be one: the older `varve layer-spec` path encodes the layer
+# as TARBALL_TOOLS/WSC_VERSION/VSIX_PACKAGES, an encoding that cannot express
+# a payload `layout` at all. An `sdk` entry translated through it silently
+# becomes an ordinary tarball and the tree gets mined for a binary.
+
+# Two runs dispatched for the SAME layer id would both ask the registry, both
+# be told the id is unpublished, and both push — the immutability check is a
+# read, and `oras manifest push` has no if-not-exists. One id would end up
+# naming two digests, which is the very thing this workflow checks for
+# (varve#115, and it happened). Serialising per layer closes the window.
+concurrency:
+  group: deposit-layer-${{ inputs.layer }}
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      layer:
+        description: "Layer identifier (YYYY.MM.P), e.g. 2026.09.2"
+        required: true
+        type: string
+      counter:
+        description: "Monotonic per-line release counter"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  deposit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+
+      - name: Install oras
+        uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1 as of 2026-08-07
+
+      # Everything downstream reads its pins from HERE, never from a literal
+      # in this file. layer.toml is the layer (REQ-PEL-MANIFEST-001); a
+      # workflow that hardcodes the registry or the varve version is a second
+      # place the realm is defined, and the two drift.
+      - name: Read the pins out of layer.toml
+        id: pins
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+          d = tomllib.load(open("layer.toml", "rb"))
+          registry = d["realm"]["registry"]
+          assert registry.startswith("oci://"), registry
+          print(f"varve={d['varve']['version']}")
+          print(f"repo={registry.removeprefix('oci://')}")
+          print(f"channel={d['realm']['channel']}")
+          PY
+          cat "$GITHUB_OUTPUT"
+
+      - name: Fetch the pinned varve release (binary + assembler)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ steps.pins.outputs.varve }}
+        run: |
+          set -euo pipefail
+          echo "varve $VER (pinned in layer.toml)"
+          mkdir -p .varve/bin
+          # Named assets, not a `varve-*` glob: the glob also matches
+          # varve-producer, and which archive a later `find` picked was then a
+          # matter of directory order.
+          gh release download "$VER" --repo pulseengine/varve -D .varve \
+            -p "varve-$VER-x86_64-unknown-linux-gnu.tar.gz" \
+            -p "varve-producer-$VER-x86_64-unknown-linux-gnu.tar.gz" \
+            -p 'SHA256SUMS.txt' -p 'SHA256SUMS.txt.cosign.bundle'
+
+      - name: Verify the varve release, then extract it
+        env:
+          VER: ${{ steps.pins.outputs.varve }}
+        run: |
+          set -euo pipefail
+          cd .varve
+          # Signature FIRST, digests second: `sha256sum -c` only proves the
+          # files match a list, and an unverified list proves nothing about
+          # who wrote it. The whole point of this repo is that a layer's
+          # contents are vouched for; the tools that vouch for them get the
+          # same treatment.
+          cosign verify-blob \
+            --certificate-identity-regexp 'https://github.com/pulseengine/varve/.github/workflows/release.yml@.*' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --bundle SHA256SUMS.txt.cosign.bundle SHA256SUMS.txt
+          sha256sum --ignore-missing -c SHA256SUMS.txt
+          # This realm's PUBLIC root is NOT in varve's release — `rolling.pub`
+          # there belongs to the `pulseengine` realm. Ours is committed in this
+          # repository as realm-root.pub, which is what a realm that varve does
+          # not ship has to do: publish its own public half where consumers can
+          # get it. Public, so committing it is not custody of anything
+          # (REQ-PEL-CUSTODY-001); the secret half is a repository secret and
+          # never a file. The sanity install below verifies against it, which
+          # is also the check that VARVE_COVALENT_KEY is still its secret half.
+          # Each archive into its own directory, then the one file we want:
+          # both carry a top-level LICENSE, and unpacking them over each other
+          # is how a later `find` starts having an opinion about which is
+          # which. The members are `./varve` and `./varve-producer`.
+          mkdir -p bin x/varve x/producer
+          tar xzf "varve-$VER-x86_64-unknown-linux-gnu.tar.gz" -C x/varve
+          tar xzf "varve-producer-$VER-x86_64-unknown-linux-gnu.tar.gz" -C x/producer
+          install -m 0755 x/varve/varve bin/varve
+          install -m 0755 x/producer/varve-producer bin/varve-producer
+          ./bin/varve --version
+          ./bin/varve-producer --version
+
+      # Printed before anything is fetched. `plan` reads layer.toml and says
+      # which release asset each payload resolves to, so a reviewer of the run
+      # log can see the layer's contents without decoding an env var.
+      - name: Plan the layer
+        run: .varve/bin/varve-producer plan --manifest layer.toml
+
+      - name: Assemble the deposit spec from layer.toml
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LAYER: ${{ inputs.layer }}
+          COUNTER: ${{ inputs.counter }}
+        run: |
+          set -euo pipefail
+          # THE adapter. It reads layer.toml directly: fetch every payload the
+          # manifest names, verify each release against its own repo's cosign
+          # identity, stage the bytes, and write the deposit spec that
+          # `varve deposit` consumes. A payload whose platform the upstream
+          # does not build is reported by name and omitted; a payload that
+          # matches NOTHING on any platform stops the run.
+          .varve/bin/varve-producer deposit \
+            --manifest layer.toml \
+            --stage "$GITHUB_WORKSPACE/deposit-stage" \
+            --layer "$LAYER" \
+            --counter "$COUNTER"
+
+      - name: Deposit the layer
+        env:
+          VARVE_COVALENT_KEY: ${{ secrets.VARVE_COVALENT_KEY }}
+          LAYER: ${{ inputs.layer }}
+          COUNTER: ${{ inputs.counter }}
+          CHANNEL: ${{ steps.pins.outputs.channel }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$VARVE_COVALENT_KEY" || { echo "::error::VARVE_COVALENT_KEY not provisioned"; exit 1; }
+          VARVE=.varve/bin/varve
+          # The key reaches varve through a FILE DESCRIPTOR, never a file
+          # (varve REQ-NOKEYDISK-001). `echo "$SECRET" > key.tmp` on a shared
+          # runner is the thing adopters wrongly invent, and varve's own
+          # workflow did exactly that until an assessor read it.
+          ISSUED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # The spec and the payload bytes it points at live together under
+          # deposit-stage/ — a payload `path` resolves relative to the SPEC
+          # FILE's directory, so the staging area moves as one tree.
+          "$VARVE" deposit \
+            --spec deposit-stage/deposit-spec.toml \
+            --issued-at "$ISSUED_AT" \
+            --key <(printf '%s' "$VARVE_COVALENT_KEY") --key-id covalent-1 \
+            --out layer-layout
+          # Sign and attach a BASELINE line-status (varve REQ-STATUS-DIST-001)
+          # so `varve status` works after an offline OR registry install with
+          # no --from-file. Empty problems/yanked — a clean starting record.
+          LINE="${LAYER%.*}"
+          # Derived from the channel's policy, never typed here: a window a
+          # human enters each release drifts, and every value looks plausible.
+          SUPPORT_UNTIL="$("$VARVE" support-horizon --channel "$CHANNEL" --issued-at "$ISSUED_AT")"
+          echo "::notice::layer $LAYER supported until $SUPPORT_UNTIL ($CHANNEL policy)"
+          printf '{"line":"%s","counter":%s,"issued-at":"%s","support-until":"%s"}\n' \
+            "$LINE" "$COUNTER" "$ISSUED_AT" "$SUPPORT_UNTIL" > baseline-status.json
+          "$VARVE" sign-status \
+            --file baseline-status.json \
+            --key <(printf '%s' "$VARVE_COVALENT_KEY") --key-id covalent-1 \
+            --out baseline-status.dsse.json
+          "$VARVE" attach-status --layout layer-layout --status baseline-status.dsse.json
+          # Sanity: the deposit installs and verifies on THIS runner, against
+          # the realm's PUBLISHED root, before anything is pushed. If the
+          # secret is not the secret half of realm-root.pub, it fails here rather
+          # than on every consumer's machine.
+          mkdir -p sanity-project
+          printf 'manifest-version = 1\n[toolchain]\nchannel = "%s"\nlayer = "%s"\n' \
+            "$CHANNEL" "$LAYER" > sanity-project/varve.toml
+          ( cd sanity-project && \
+            VARVE_ROOT="$RUNNER_TEMP/sanity-root" \
+            VARVE_TRUST_ROOT="$GITHUB_WORKSPACE/realm-root.pub" \
+            "$GITHUB_WORKSPACE/$VARVE" install --from "$GITHUB_WORKSPACE/layer-layout" && \
+            VARVE_ROOT="$RUNNER_TEMP/sanity-root" \
+            VARVE_TRUST_ROOT="$GITHUB_WORKSPACE/realm-root.pub" \
+            "$GITHUB_WORKSPACE/$VARVE" verify )
+
+      - name: Publish to the realm's registry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LAYER: ${{ inputs.layer }}
+          REPO: ${{ steps.pins.outputs.repo }}
+        run: |
+          set -euo pipefail
+          oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin <<< "$GH_TOKEN"
+          # Explicit publish: stream every blob with `oras blob push` (no
+          # metadata size limits), then push a hand-built artifact manifest —
+          # the exact shape varve's RegistrySource consumes (envelope/payload
+          # role annotations on layers[]).
+          SIG_TYPE='application/vnd.pulseengine.varve.signature.v1+json'
+          STATUS_TYPE='application/vnd.pulseengine.varve.line-status.v1+json'
+          mkdir -p push && cd push
+          PAYLOAD_DIGEST=$(jq -r --arg t "$SIG_TYPE" --arg s "$STATUS_TYPE" \
+            '[.manifests[] | select(.artifactType != $t and .artifactType != $s)][0].digest' ../layer-layout/index.json)
+          ENVELOPE_DIGEST=$(jq -r --arg t "$SIG_TYPE" \
+            '[.manifests[] | select(.artifactType == $t)][0].digest' ../layer-layout/index.json)
+          STATUS_DIGEST=$(jq -r --arg s "$STATUS_TYPE" \
+            '[.manifests[] | select(.artifactType == $s)][0].digest // empty' ../layer-layout/index.json)
+          PAYLOAD_FILE="../layer-layout/blobs/sha256/${PAYLOAD_DIGEST#sha256:}"
+          ENVELOPE_FILE="../layer-layout/blobs/sha256/${ENVELOPE_DIGEST#sha256:}"
+          STATUS_FILE="../layer-layout/blobs/sha256/${STATUS_DIGEST#sha256:}"
+          test -n "$STATUS_DIGEST" || { echo "::error::baseline line-status missing from layout"; exit 1; }
+
+          # 1. Build the artifact manifest — envelope + payload + tools, plus
+          #    the baseline line-status as a role-annotated layer so
+          #    RegistrySource.fetch_line_status finds it.
+          jq -n \
+            --arg env_digest "$ENVELOPE_DIGEST" \
+            --argjson env_size "$(stat -c%s "$ENVELOPE_FILE")" \
+            --arg payload_digest "$PAYLOAD_DIGEST" \
+            --argjson payload_size "$(stat -c%s "$PAYLOAD_FILE")" \
+            --arg status_digest "$STATUS_DIGEST" \
+            --argjson status_size "$(stat -c%s "$STATUS_FILE")" \
+            --slurpfile payload "$PAYLOAD_FILE" \
+            '{
+              schemaVersion: 2,
+              mediaType: "application/vnd.oci.image.manifest.v1+json",
+              artifactType: "application/vnd.pulseengine.varve.layer.v1+json",
+              config: {
+                mediaType: "application/vnd.oci.empty.v1+json",
+                digest: "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                size: 2
+              },
+              layers: ([
+                {
+                  mediaType: "application/json",
+                  digest: $env_digest,
+                  size: $env_size,
+                  annotations: {"eu.pulseengine.varve.role": "envelope"}
+                },
+                {
+                  mediaType: "application/vnd.oci.image.index.v1+json",
+                  digest: $payload_digest,
+                  size: $payload_size,
+                  annotations: {"eu.pulseengine.varve.role": "payload"}
+                },
+                {
+                  mediaType: "application/json",
+                  digest: $status_digest,
+                  size: $status_size,
+                  annotations: {"eu.pulseengine.varve.role": "line-status"}
+                }
+              ] + [ $payload[0].manifests[] |
+                    { mediaType: "application/octet-stream",
+                      digest: .digest,
+                      size: .size } ])
+            }' > artifact-manifest.json
+          head -c 1500 artifact-manifest.json; echo
+
+          # 1b. Bring the repository into existence before asking what it
+          #     holds. On a registry path that has never been pushed to, BOTH
+          #     reads fail — `oras manifest fetch` says the tag is not there and
+          #     `oras repo tags` says "name unknown: repository name not known
+          #     to registry" — so publish-check correctly refuses: it cannot
+          #     ESTABLISH absence, and it will not infer absence from a failure.
+          #     Correct in general, and it means a new realm path can never
+          #     receive its first layer. That is the state the move to
+          #     ghcr.io/pulseengine/layers created (varve DD-028).
+          #
+          #     The fix is NOT to teach the check to read error prose — that is
+          #     the refutation that produced this check, where a repo path
+          #     containing "404" read as absent. It is to make the question
+          #     ANSWERABLE.
+          #
+          #     A BLOB IS NOT ENOUGH, and this is measured rather than assumed:
+          #     an earlier attempt pushed the empty-config blob here, the push
+          #     succeeded ("Pushed: [registry] ghcr.io/pulseengine/layers"), and
+          #     `oras repo tags` still answered "name unknown". GHCR materialises
+          #     a package when a MANIFEST is pushed, not when a blob is. So push
+          #     a manifest, under a tag that is not a layer.
+          #
+          #     `realm-bootstrap` cannot be parsed as a `YYYY.MM.P` layer id, so
+          #     varve's `layers_of_line` filters it out: it is never reported as
+          #     a served layer and cannot make an honest registry look like it
+          #     is serving one the signed index never named.
+          #
+          #     Idempotent — same bytes, same digest, same tag — and it weakens
+          #     nothing: the layer tag is still asked about, and a repository
+          #     that already carries it still refuses the push.
+          printf '{}' > empty-config.json
+          oras blob push "$REPO" empty-config.json
+          EMPTY='sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a'
+          jq -n --arg d "$EMPTY" '{
+            schemaVersion: 2,
+            mediaType: "application/vnd.oci.image.manifest.v1+json",
+            artifactType: "application/vnd.pulseengine.varve.realm-bootstrap.v1+json",
+            config: { mediaType: "application/vnd.oci.empty.v1+json", digest: $d, size: 2 },
+            layers: [ { mediaType: "application/vnd.oci.empty.v1+json", digest: $d, size: 2 } ],
+            annotations: {
+              "org.opencontainers.image.description":
+                "Creates this repository so the immutability check can read a tag listing. Not a layer."
+            }
+          }' > realm-bootstrap.json
+          oras manifest push "$REPO:realm-bootstrap" realm-bootstrap.json
+          # And prove the listing is now answerable, rather than hoping.
+          oras repo tags "$REPO" > bootstrap-tags.txt
+          echo "repository now lists:"; cat bootstrap-tags.txt
+
+          # 2. A layer id names one set of bytes, forever (varve
+          #    REQ-IMMUTABLE-001). Ask the registry what it already carries
+          #    under this tag BEFORE anything is written to it — ahead of the
+          #    blob pushes, not merely ahead of the manifest push.
+          #
+          #    An OCI manifest's digest IS the sha256 of its bytes, and
+          #    `oras manifest push` has no --dry-run to ask with.
+          #
+          #    A registry that cannot ANSWER stops the push. "Unreachable" is
+          #    not "empty": reading an outage as an empty registry is how you
+          #    republish over a layer that exists while believing you are
+          #    publishing a new one.
+          INCOMING="sha256:$(sha256sum artifact-manifest.json | cut -d' ' -f1)"
+          # NOT piped into tee: `cmd | tee` reports tee's exit status, and a
+          # `set -o pipefail` a hundred lines away is a thin thread to hang a
+          # refusal on. Written to a file, exit status checked on its own line.
+          # $GITHUB_WORKSPACE, not ./ — this step runs from `push/`.
+          PRODUCER="$GITHUB_WORKSPACE/.varve/bin/varve-producer"
+          test -x "$PRODUCER" || {
+            echo "::error::$PRODUCER is missing or not executable — the deposit \
+          cannot check whether this layer id is already published, and \
+          publishing without that check is how one id comes to name two sets \
+          of bytes"
+            exit 1
+          }
+          set +e
+          "$PRODUCER" publish-check \
+            --repo "$REPO" --layer "$LAYER" --digest "$INCOMING" \
+            --format json > publish-check.json
+          CHECK_RC=$?
+          set -e
+          cat publish-check.json
+          # 127 is "could not run", not "said no". Both stop the push, and
+          # must: a check that did not run is not a check that passed. But
+          # reporting them identically sends an operator hunting for a
+          # republish that never happened.
+          if [ "$CHECK_RC" -eq 127 ]; then
+            echo "::error::publish-check could not run (exit 127) — this is not \
+          a refusal; nothing was checked and nothing was pushed"
+            exit "$CHECK_RC"
+          fi
+          if [ "$CHECK_RC" -ne 0 ]; then
+            echo "::error::publish-check REFUSED this push (exit $CHECK_RC) — \
+          see the output above for which digests disagree"
+            exit "$CHECK_RC"
+          fi
+          VERDICT="$(jq -r .verdict publish-check.json)"
+
+          # 3. Push every blob: envelope, payload, tools, line-status. The
+          #    config blob went up in step 1b to make the repository exist.
+          oras blob push "$REPO" "$ENVELOPE_FILE"
+          oras blob push "$REPO" "$PAYLOAD_FILE"
+          for digest in $(jq -r '.manifests[].digest' "$PAYLOAD_FILE"); do
+            oras blob push "$REPO" "../layer-layout/blobs/sha256/${digest#sha256:}"
+          done
+          oras blob push "$REPO" "$STATUS_FILE"
+
+          if [ "$VERDICT" = "already-published" ]; then
+            echo "::notice::$LAYER is already published at $INCOMING — skipping the push"
+          else
+            # 4. Push the manifest under the layer tag.
+            oras manifest push "$REPO:$LAYER" artifact-manifest.json
+          fi
+
+      - name: Upload the oci-layout (artifact of record)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: layer-${{ inputs.layer }}-oci-layout
+          path: layer-layout
+          retention-days: 90

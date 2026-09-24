@@ -1,0 +1,40 @@
+name: check
+
+# The scanner decides, with no person in the loop, what an immutable signed
+# layer pins — and this repository had no test job at all, so its two defects
+# (only `[[tool]]` scanned; a hub payload's version taken from a release tag)
+# were found by reading rather than by running. A gate that runs on every change
+# is what makes the next one cheaper to find.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: the manifest parses and the scanner's rules hold
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: the scanner's rules
+        # No network: `plan` takes the "latest release" function as an
+        # argument, so the rules are tested without asking a forge anything.
+        run: python3 -m unittest discover -s tools -p 'test_*.py' -v
+
+      - name: the manifest itself
+        env:
+          # Required, and its absence is why this job first went red: `gh` with
+          # no token cannot ask, `gh release view` exits non-zero, and the
+          # checker used to read that as "the release does not exist" — eleven
+          # correct pins reported missing, including one published minutes
+          # earlier. The checker now says "could not ask" instead, and the
+          # token is what lets it ask. Cross-repo reads work with the default
+          # token because every pinned repository here is public; the deposit
+          # workflow reads them the same way.
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/check-manifest.py
