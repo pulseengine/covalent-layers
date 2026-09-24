@@ -24,6 +24,30 @@ spec.loader.exec_module(pins)
 ROOT = pathlib.Path(__file__).parent.parent
 
 
+class CompositionEdgesAreNotPayloads(unittest.TestCase):
+    """`[[include]]` is a composition edge and must never be scanned."""
+
+    MANIFEST = {
+        "realm": {"registry": "oci://ghcr.io/pulseengine/covalent-layers"},
+        "tool": [{"name": "wac", "version": "v0.11.0"}],
+        "include": [{"digest": "sha256:" + "a" * 64, "realm": "pulseengine",
+                     "layer": "2026.09.12"}],
+    }
+
+    def test_include_is_not_a_payload_section(self):
+        self.assertNotIn("include", pins.sections(self.MANIFEST))
+
+    def test_entries_skips_composition_edges(self):
+        names = [e.get("name") for _, e in pins.entries(self.MANIFEST)]
+        self.assertEqual(names, ["wac"])
+
+    def test_a_realm_that_is_ONLY_a_composition_has_no_payloads(self):
+        # The covalent realm's real shape: no tools at all.
+        m = {"realm": self.MANIFEST["realm"], "include": self.MANIFEST["include"]}
+        self.assertEqual(pins.sections(m), [])
+        self.assertEqual(pins.entries(m), [])
+
+
 class TagDecoratesTheVersion(unittest.TestCase):
     """A tag that decorates the version is still derivable; a hub is not."""
 
@@ -74,13 +98,25 @@ class RegistryRef(unittest.TestCase):
             pins.registry_ref({"realm": {"registry": "oci://ghcr.io"}})
 
     def test_this_repository_resolves_to_its_own_registry(self):
+        # Realm-agnostic on purpose. This file is COPIED into every realm, and
+        # a literal `/wasm-layers` here is a test that passes in one repository
+        # and fails in the next for no reason of its own — which is exactly
+        # what happened the first time these tools were reused.
+        #
+        # The invariant that matters is the bug it was written for: a realm
+        # must derive its layer id from ITS OWN published record. The counter
+        # is the per-line anti-rollback high-water mark, so reading another
+        # realm's record would sign a history this realm does not have.
         with open(ROOT / "layer.toml", "rb") as f:
             m = tomllib.load(f)
         ref = pins.registry_ref(m)
-        self.assertTrue(ref.endswith("/wasm-layers"), ref)
-        self.assertNotIn(
-            "pulseengine/layers", ref,
-            "this realm would derive its layer id from the pulseengine realm's record",
+        declared = m["realm"]["registry"].removeprefix("oci://").removeprefix("oci+http://")
+        self.assertEqual(
+            ref, declared.rstrip("/"),
+            "the ref must come from THIS manifest, not from anywhere else",
+        )
+        self.assertTrue(
+            ref.startswith(f"{pins.registry_ref(m).split('/')[0]}/"), ref
         )
 
 
@@ -109,8 +145,18 @@ class TheScriptUsesIt(unittest.TestCase):
             cwd=ROOT, capture_output=True, text=True, env=env,
         )
         out = r.stdout + r.stderr
-        self.assertIn("wasm-layers", out, out[:400])
-        self.assertNotIn("pulseengine/layers ", out, out[:400])
+        # Realm-agnostic: the ref it names must be THIS manifest's, whatever
+        # realm this copy of the tooling lives in. Asserting a literal here is
+        # how a shared test becomes a test of which repository you are in.
+        with open(ROOT / "layer.toml", "rb") as f:
+            expected = pins.registry_ref(tomllib.load(f))
+        self.assertIn(expected, out, out[:400])
+        # And never another realm's record: the counter is an anti-rollback
+        # high-water mark, so deriving it from the wrong realm signs a history
+        # this one does not have.
+        for foreign in ("pulseengine/layers", "pulseengine/wasm-layers"):
+            if foreign != expected.split("/", 1)[1]:
+                self.assertNotIn(f"/{foreign} ", out, out[:400])
 
 
 class WhatTheRegistryAnswers(unittest.TestCase):

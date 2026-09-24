@@ -22,9 +22,26 @@ Two rules, and the second is the one that keeps being missed:
 """
 
 
+#: Top-level arrays that are NOT payload sections.
+#:
+#: `[[include]]` is a composition EDGE, not a payload: it names another
+#: realm's layer by the digest of its signed manifest, and it has no `name`,
+#: no `version` and no repository to ask for a newer release. A scanner that
+#: treated it as a payload would fail on the missing name — and if it somehow
+#: got past that, "bumping" an include is the one thing a digest pin exists to
+#: prevent. Moving a composition to a newer upstream layer is a REVIEWED
+#: decision about whose bytes this realm vouches for, never an unattended
+#: rewrite.
+NOT_PAYLOADS = frozenset({"include"})
+
+
 def sections(manifest: dict) -> list[str]:
     """Every payload section the manifest defines, in its own order."""
-    return [k for k, v in manifest.items() if isinstance(v, list)]
+    return [
+        k
+        for k, v in manifest.items()
+        if isinstance(v, list) and k not in NOT_PAYLOADS
+    ]
 
 
 def entries(manifest: dict):
