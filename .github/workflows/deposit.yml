@@ -50,7 +50,7 @@ jobs:
         uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
 
       - name: Install oras
-        uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1 as of 2026-08-07
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v1 as of 2026-08-07
 
       # Everything downstream reads its pins from HERE, never from a literal
       # in this file. layer.toml is the layer (REQ-PEL-MANIFEST-001); a
