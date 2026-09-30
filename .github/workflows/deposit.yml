@@ -85,7 +85,8 @@ jobs:
           gh release download "$VER" --repo pulseengine/varve -D .varve \
             -p "varve-$VER-x86_64-unknown-linux-gnu.tar.gz" \
             -p "varve-producer-$VER-x86_64-unknown-linux-gnu.tar.gz" \
-            -p 'SHA256SUMS.txt' -p 'SHA256SUMS.txt.cosign.bundle'
+            -p 'SHA256SUMS.txt' -p 'SHA256SUMS.txt.cosign.bundle' \
+            -p 'varve-realms.toml'
 
       - name: Verify the varve release, then extract it
         env:
@@ -151,6 +152,11 @@ jobs:
       - name: Deposit the layer
         env:
           VARVE_COVALENT_KEY: ${{ secrets.VARVE_COVALENT_KEY }}
+          # The sanity install at the end of this step FETCHES the included
+          # layers from their realms' registries, so this step needs registry
+          # credentials of its own. It did not have them, because before a
+          # composition realm existed nothing in this step reached the network.
+          GH_TOKEN: ${{ github.token }}
           LAYER: ${{ inputs.layer }}
           COUNTER: ${{ inputs.counter }}
           CHANNEL: ${{ steps.pins.outputs.channel }}
@@ -194,6 +200,24 @@ jobs:
           mkdir -p sanity-project
           printf 'manifest-version = 1\n[toolchain]\nchannel = "%s"\nlayer = "%s"\n' \
             "$CHANNEL" "$LAYER" > sanity-project/varve.toml
+          # THIS LAYER IS ONLY A COMPOSITION, so the sanity install follows its
+          # includes — and an include names a REALM, whose registry says where
+          # the bytes come from and whose trust root says whether they are
+          # acceptable. Without definitions for those realms the install
+          # refuses, which is correct and is what the first deposit hit:
+          #
+          #   error: layer 2026.09.0 composes 2 layer(s) that are not installed:
+          #     2026.09.12 (realm 'pulseengine'): ... no varve-realms.toml found
+          #
+          # The definitions come from the varve release already downloaded
+          # above, not from a copy pasted here: a trust root pasted into a
+          # workflow is a trust root nobody rotates.
+          cp .varve/varve-realms.toml sanity-project/varve-realms.toml
+          # And the included layers are fetched from their realms' registries,
+          # so this needs registry credentials — per HOST, not per layer. The
+          # publish step logs in later for its own reasons; the sanity install
+          # happens first and needs it too.
+          oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin <<< "$GH_TOKEN"
           ( cd sanity-project && \
             VARVE_ROOT="$RUNNER_TEMP/sanity-root" \
             VARVE_TRUST_ROOT="$GITHUB_WORKSPACE/realm-root.pub" \
