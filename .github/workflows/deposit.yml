@@ -291,10 +291,16 @@ jobs:
                   size: $status_size,
                   annotations: {"eu.pulseengine.varve.role": "line-status"}
                 }
-              ] + [ $payload[0].manifests[] |
-                    { mediaType: "application/octet-stream",
-                      digest: .digest,
-                      size: .size } ])
+              ] + [ $payload[0].manifests[]
+                    # A composition edge is NOT a payload. Its digest names
+                    # ANOTHER layer's signed manifest, living in that realm's
+                    # registry — there is no blob for it here and there must
+                    # not be one there. The edge already travels inside the
+                    # signed payload, which is where a consumer reads it.
+                    | select(.annotations["eu.pulseengine.varve.kind"] != "layer")
+                    | { mediaType: "application/octet-stream",
+                        digest: .digest,
+                        size: .size } ])
             }' > artifact-manifest.json
           head -c 1500 artifact-manifest.json; echo
 
@@ -399,7 +405,19 @@ jobs:
           #    config blob went up in step 1b to make the repository exist.
           oras blob push "$REPO" "$ENVELOPE_FILE"
           oras blob push "$REPO" "$PAYLOAD_FILE"
-          for digest in $(jq -r '.manifests[].digest' "$PAYLOAD_FILE"); do
+          # Same rule as the manifest above, and this is the line that
+          # failed covalent's first deposit:
+          #
+          #   Error: failed to open ../layer-layout/blobs/sha256/b97266c6…:
+          #          no such file or directory
+          #
+          # b97266c6… is the pulseengine layer this one composes. `install`,
+          # `inspect` and `reverify` each already know an edge is not a
+          # payload; publishing did not, because until this realm existed no
+          # layout had one.
+          for digest in $(jq -r '.manifests[]
+                                 | select(.annotations["eu.pulseengine.varve.kind"] != "layer")
+                                 | .digest' "$PAYLOAD_FILE"); do
             oras blob push "$REPO" "../layer-layout/blobs/sha256/${digest#sha256:}"
           done
           oras blob push "$REPO" "$STATUS_FILE"
