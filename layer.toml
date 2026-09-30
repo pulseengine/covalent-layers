@@ -25,10 +25,14 @@
 # and a missing realm would silently fall back to the composing project's root.
 
 [varve]
-# The release whose assembler builds this layer. v0.38.0 is the first that can:
-# it is where `varve install` learned to walk a composition and fetch what it
-# names, so a consumer of THIS layer gets both halves from one command.
-version = "v0.38.0"
+# The release whose assembler builds this layer. v0.38.0 learned to walk a
+# composition and fetch what it names — but it fetched an included realm into
+# the COMPOSING realm's partition instead of a sibling, so `install` exited 0
+# and the layers it had just fetched were unreachable. Consumers were told to
+# promote them by hand before verifying. v0.39.0 is the first release where
+# this layer installs correctly from one command, which is the only reason
+# this layer exists.
+version = "v0.39.0"
 
 [realm]
 name     = "covalent"
