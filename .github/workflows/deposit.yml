@@ -293,10 +293,17 @@ jobs:
                 }
               ] + [ $payload[0].manifests[]
                     # A composition edge is NOT a payload. Its digest names
-                    # ANOTHER layer's signed manifest, living in that realm's
-                    # registry — there is no blob for it here and there must
-                    # not be one there. The edge already travels inside the
-                    # signed payload, which is where a consumer reads it.
+                    # the signed manifest of ANOTHER layer, held in the
+                    # registry of the realm that owns it — there is no blob
+                    # for it here and there must not be one. The edge already
+                    # travels inside the signed payload, which is where a
+                    # consumer reads it.
+                    #
+                    # NOTE: no apostrophes in this comment. The whole jq
+                    # program is a single-quoted shell string, so a
+                    # single quote character ends the quote and jq is handed
+                    # a fragment. That is exactly how this line failed the
+                    # first time, in the comment warning about it.
                     | select(.annotations["eu.pulseengine.varve.kind"] != "layer")
                     | { mediaType: "application/octet-stream",
                         digest: .digest,
