@@ -47,9 +47,9 @@ registry = "oci://ghcr.io/pulseengine/covalent-layers"
 # The PulseEngine methodology toolchain — rivet, spar, synth, witness, ordeal,
 # loom, meld, kilnd, wsc, varve-producer, the VS Code extensions and the docs.
 [[include]]
-digest = "sha256:b97266c64fce402ade09d0ddd306cbfc0072b1907a147fec5bc8f7287d30ab4c"
+digest = "sha256:666db423ae401c3a5f6f66ff1353881f7ac162345f321cad43c87e971eba05bf"
 realm  = "pulseengine"
-layer  = "2026.09.12"
+layer  = "2026.09.19"
 
 # The component-model tools from bytecodealliance, vouched for by PulseEngine.
 # THREE OF ITS FOUR PAYLOADS CARRY NO PROOF OF ORIGIN — wac, wkg and
