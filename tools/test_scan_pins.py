@@ -79,6 +79,129 @@ def fixed(**tags):
     return latest
 
 
+EDGES = """
+[varve]
+version = "v0.39.0"
+
+[realm]
+name    = "covalent"
+channel = "rolling"
+
+[[include]]
+realm  = "pulseengine"
+layer  = "2026.10.4"
+digest = "sha256:aaaa"
+
+[[include]]
+realm  = "pulseengine-wasm"
+layer  = "2026.09.0"
+digest = "sha256:bbbb"
+"""
+
+MIXED = MANIFEST + """
+[[include]]
+realm  = "pulseengine"
+layer  = "2026.10.4"
+digest = "sha256:aaaa"
+"""
+
+
+def edges_manifest():
+    return tomllib.loads(EDGES)
+
+
+def lines(**table):
+    """A `newer_layers` that answers from a table.
+
+    A value is either a list of newer layer ids, or None for "that realm
+    publishes no signed index for this line" — the state that must never read
+    as "nothing moved".
+    """
+    def newer_layers(realm, layer):
+        if realm not in table:
+            raise AssertionError(f"asked about an unexpected realm: {realm}")
+        answer = table[realm]
+        if answer is None:
+            return (False, [])
+        return (True, answer)
+    return newer_layers
+
+
+class CompositionEdges(unittest.TestCase):
+    """THE defect this realm shipped with: its manifest holds ONLY
+    `[[include]]`, so every scan examined zero entries and printed "nothing
+    moved" — through four layers of drift, while the composition pinned
+    pulseengine 2026.10.4 and that line reached 2026.10.8.
+
+    Not REWRITING an include is correct and stays correct: a digest pin exists
+    so that moving a composition is a reviewed decision. Not LOOKING at one is
+    what let the realm appear healthy while standing still.
+    """
+
+    def test_an_include_whose_line_moved_is_reported(self):
+        _, notes = scan_pins.plan(
+            edges_manifest(),
+            fixed(),
+            lines(**{"pulseengine": ["2026.10.5", "2026.10.8"],
+                     "pulseengine-wasm": []}),
+        )
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("pulseengine", notes[0])
+        self.assertIn("2026.10.4", notes[0])
+        self.assertIn("2026.10.8", notes[0])
+
+    def test_an_include_is_never_rewritten(self):
+        updates, _ = scan_pins.plan(
+            edges_manifest(),
+            fixed(),
+            lines(**{"pulseengine": ["2026.10.8"],
+                     "pulseengine-wasm": ["2026.10.0"]}),
+        )
+        self.assertEqual(updates, [], "an include reached the rewrite list")
+
+    def test_an_include_at_the_newest_layer_says_nothing(self):
+        _, notes = scan_pins.plan(
+            edges_manifest(),
+            fixed(),
+            lines(**{"pulseengine": [], "pulseengine-wasm": []}),
+        )
+        self.assertEqual(notes, [])
+
+    def test_an_unanswerable_include_is_reported_not_treated_as_unmoved(self):
+        """A realm with no signed index cannot be asked, and that is a
+        different fact from "nothing newer exists" — which is why
+        `varve outdated` carries an `answerable` flag at all."""
+        _, notes = scan_pins.plan(
+            edges_manifest(),
+            fixed(),
+            lines(**{"pulseengine": [], "pulseengine-wasm": None}),
+        )
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("CANNOT BE ESTABLISHED", notes[0])
+        self.assertIn("pulseengine-wasm", notes[0])
+
+    def test_includes_with_no_checker_refuse_rather_than_skip(self):
+        """Scanning payloads only and calling it a scan is the original bug."""
+        with self.assertRaises(RuntimeError) as caught:
+            scan_pins.plan(edges_manifest(), fixed())
+        self.assertIn("Refusing to scan", str(caught.exception))
+
+    def test_payload_scanning_is_unaffected_by_edges(self):
+        updates, notes = scan_pins.plan(
+            tomllib.loads(MIXED),
+            fixed(**{
+                "pulseengine/rivet": "v0.38.0", "pulseengine/spar": "v0.37.0",
+                "pulseengine/jess": "v0.7.2", "pulseengine/varve": "v0.36.0",
+            }),
+            lines(**{"pulseengine": ["2026.10.8"]}),
+        )
+        self.assertIn(("tool", "rivet", "version", "v0.37.0", "v0.38.0"), updates)
+        self.assertTrue(any("2026.10.8" in n for n in notes), notes)
+        self.assertFalse(
+            any(u[0] == "include" for u in updates), "an include was rewritten"
+        )
+
+
 class Sections(unittest.TestCase):
     def test_sections_come_from_the_manifest_not_from_a_list_here(self):
         # The bug: a hand-kept list. A section the manifest defines must be

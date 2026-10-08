@@ -45,7 +45,7 @@ import sys
 import tomllib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pins import asked_tag, repo_of, sections, tracks_tag  # noqa: E402
+from pins import asked_tag, includes, repo_of, sections, tracks_tag  # noqa: E402
 
 MANIFEST = "layer.toml"
 
@@ -64,11 +64,74 @@ def latest_release(repo: str) -> str:
     return tag
 
 
-def plan(manifest: dict, latest: "callable") -> tuple[list[tuple], list[str]]:
+def varve_newer_layers(varve_bin: str, realms_file: str, channel: str) -> "callable":
+    """Ask VARVE whether a realm's line holds anything newer than `layer`.
+
+    Deliberately not a line index parsed here. The index is a DSSE envelope
+    signed by the realm's root, and verifying it correctly — right key, right
+    line, counter not regressing, omission detected — is varve's job and is
+    system-tested there. A copy of that logic in this repository would be a
+    second implementation of a trust decision, which is the thing this realm
+    exists to avoid (REQ-PEL-ASSEMBLER-001). A tag listing is not an option
+    either: a registry that HIDES a layer is undetectable that way.
+
+    So: synthesise the pin varve already knows how to answer, and run
+    `varve outdated --json`, whose `answerable` flag exists for exactly this —
+    telling "there is nothing newer" apart from "I cannot know".
+
+    The channel comes from the COMPOSING realm, because a composition on the
+    rolling channel includes rolling layers. If that is ever wrong, varve
+    answers "cannot answer" and the caller reports it; it cannot silently
+    answer about the wrong line.
+    """
+    import shutil
+    import tempfile
+
+    def ask(realm: str, layer: str) -> tuple[bool, list[str]]:
+        work = tempfile.mkdtemp(prefix="covalent-include-")
+        try:
+            shutil.copyfile(realms_file, os.path.join(work, "varve-realms.toml"))
+            with open(os.path.join(work, "varve.toml"), "w") as f:
+                f.write(
+                    "manifest-version = 1\n\n[toolchain]\n"
+                    f'realm   = "{realm}"\n'
+                    f'channel = "{channel}"\n'
+                    f'layer   = "{layer}"\n'
+                )
+            out = subprocess.run(
+                [os.path.abspath(varve_bin), "outdated", "--json"],
+                cwd=work, capture_output=True, text=True,
+                env={**os.environ, "VARVE_STORE": os.path.join(work, "store")},
+            )
+            if out.returncode != 0 or not out.stdout.strip():
+                # Not an error here: varve exits non-zero when it cannot
+                # answer, and "cannot answer" is a reportable state, not a
+                # crash. The caller turns it into a note for a person.
+                return (False, [])
+            answer = json.loads(out.stdout)
+            if not answer.get("answerable"):
+                return (False, [])
+            return (True, [n["layer"] for n in answer.get("newer", [])])
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    return ask
+
+
+def plan(
+    manifest: dict, latest: "callable", newer_layers: "callable" = None
+) -> tuple[list[tuple], list[str]]:
     """What to rewrite, and what needs a person.
 
-    `latest(repo)` returns the newest tag. Pure apart from that, so the rules
-    above are testable without a network.
+    `latest(repo)` returns the newest tag for a payload's repository.
+    `newer_layers(realm, layer)` answers, for a composition edge, whether that
+    realm's line holds anything newer: `(answerable, [newer layer ids])`. Pure
+    apart from those two, so every rule here is testable without a network.
+
+    A manifest with includes and no `newer_layers` RAISES rather than skipping
+    them. Skipping is what this scanner did for four layers of drift, and the
+    whole module is built on "I could not ask" never looking like "nothing
+    moved".
     """
     updates: list[tuple] = []
     needs_a_person: list[str] = []
@@ -98,6 +161,43 @@ def plan(manifest: dict, latest: "callable") -> tuple[list[tuple], list[str]]:
                     updates.append((section, name, "version", entry["version"], bare))
             else:
                 updates.append((section, name, "version", entry["version"], newest))
+
+    # COMPOSITION EDGES. Reported, never rewritten (pins.NOT_PAYLOADS says
+    # why): moving a composition to a newer upstream layer decides whose bytes
+    # this realm vouches for, and a digest pin exists precisely so that is not
+    # an unattended rewrite. But it must be SAID, or a manifest that holds only
+    # includes — like this one — reports "nothing moved" forever while the
+    # upstream line runs away from it.
+    edges = includes(manifest)
+    if edges and newer_layers is None:
+        raise RuntimeError(
+            "this manifest declares composition edges and no way to ask whether "
+            "they moved. Refusing to scan: reporting 'nothing moved' without "
+            "having looked is the failure this scanner is built to prevent."
+        )
+    for edge in edges:
+        realm, layer = edge["realm"], edge["layer"]
+        answerable, newer = newer_layers(realm, layer)
+        if not answerable:
+            needs_a_person.append(
+                f"include of realm '{realm}' pins layer {layer}, and whether "
+                f"anything newer exists CANNOT BE ESTABLISHED — that realm "
+                f"publishes no signed line index for this line. A registry tag "
+                f"listing would answer faster and is refused: a host that hides "
+                f"a layer serves nothing that fails verification, so a listing "
+                f"cannot tell 'there is nothing newer' from 'I am not telling "
+                f"you'. This is not 'nothing moved'."
+            )
+            continue
+        if not newer:
+            continue
+        needs_a_person.append(
+            f"include of realm '{realm}' pins layer {layer} and that line now "
+            f"holds {', '.join(newer)}. Nothing here rewrites it: an include "
+            f"names a layer by the digest of its signed manifest, and moving it "
+            f"is a decision about whose bytes this realm vouches for. A person "
+            f"states the new layer AND its digest."
+        )
     return updates, needs_a_person
 
 
@@ -148,9 +248,37 @@ def main(argv: list[str]) -> int:
             raise RuntimeError(f"{repo}: already failed")
         return cache[repo]
 
+    # The include checker, when this manifest has composition edges. varve and
+    # the realms file must be on hand; without them the scan REFUSES rather
+    # than silently examining payloads only.
+    newer_layers = None
+    if manifest.get("include"):
+        varve_bin = os.environ.get("VARVE_BIN", "")
+        realms = os.environ.get("VARVE_REALMS", "")
+        if not varve_bin or not os.path.exists(varve_bin):
+            print(
+                "::error::this manifest declares composition edges, and VARVE_BIN "
+                "is unset or missing. Whether an include has moved is answerable "
+                "only from the included realm's SIGNED line index, which varve "
+                "verifies. Refusing to scan payloads alone and call it a scan.",
+                file=sys.stderr,
+            )
+            return 1
+        if not realms or not os.path.exists(realms):
+            print(
+                "::error::VARVE_REALMS is unset or missing. The realms file carries "
+                "the trust root an included realm's index is verified against; "
+                "without it varve cannot answer and this scan would under-report.",
+                file=sys.stderr,
+            )
+            return 1
+        newer_layers = varve_newer_layers(
+            varve_bin, realms, manifest["realm"]["channel"]
+        )
+
     updates, needs_a_person = [], []
     try:
-        updates, needs_a_person = plan(manifest, latest)
+        updates, needs_a_person = plan(manifest, latest, newer_layers)
     except RuntimeError:
         pass  # a failed query; reported below, and nothing is trusted
 
@@ -185,7 +313,8 @@ def main(argv: list[str]) -> int:
     for row in updates:
         print("\t".join(row))
     print(
-        f"{len(updates)} pin(s) moved, {len(needs_a_person)} needing a person",
+        f"{len(updates)} pin(s) moved, {len(needs_a_person)} needing a person "
+        f"({len(manifest.get('include', []))} composition edge(s) examined)",
         file=sys.stderr,
     )
     return 0

@@ -37,6 +37,20 @@ class CompositionEdgesAreNotPayloads(unittest.TestCase):
     def test_include_is_not_a_payload_section(self):
         self.assertNotIn("include", pins.sections(self.MANIFEST))
 
+    def test_an_include_is_reachable_even_though_it_is_not_a_section(self):
+        """Excluded from the rewrite, NOT hidden from the report.
+
+        Conflating those two cost this realm four layers of drift: its manifest
+        holds only `[[include]]`, so a scanner driven by `sections()` alone
+        examined nothing and said "nothing moved".
+        """
+        edges = pins.includes(self.MANIFEST)
+        self.assertTrue(edges, "the manifest's composition edges are unreachable")
+        self.assertNotIn("include", pins.sections(self.MANIFEST))
+
+    def test_a_manifest_with_no_includes_yields_no_edges(self):
+        self.assertEqual(pins.includes({"tool": [{"name": "x"}]}), [])
+
     def test_entries_skips_composition_edges(self):
         names = [e.get("name") for _, e in pins.entries(self.MANIFEST)]
         self.assertEqual(names, ["wac"])
