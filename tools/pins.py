@@ -32,6 +32,18 @@ Two rules, and the second is the one that keeps being missed:
 #: prevent. Moving a composition to a newer upstream layer is a REVIEWED
 #: decision about whose bytes this realm vouches for, never an unattended
 #: rewrite.
+#:
+#: NOT REWRITTEN IS NOT THE SAME AS NOT LOOKED AT, and conflating the two cost
+#: this realm four layers of drift. Excluding includes from `sections()` keeps
+#: them out of the rewrite, which is right. It also made them invisible: this
+#: manifest holds ONLY includes, so every scan examined zero entries and
+#: reported "nothing moved" while the composition pinned pulseengine 2026.10.4
+#: and that line reached 2026.10.8. The realm looked healthy because the
+#: scanner had nothing to say and no way to say it had nothing to say.
+#:
+#: So includes are reachable through `includes()` below and reported by the
+#: scanner as needing a person — the same channel the hub case already uses.
+#: They never enter the rewrite list.
 NOT_PAYLOADS = frozenset({"include"})
 
 
@@ -47,6 +59,18 @@ def sections(manifest: dict) -> list[str]:
 def entries(manifest: dict):
     """Every payload entry, as (section, entry)."""
     return [(s, e) for s in sections(manifest) for e in manifest[s]]
+
+
+def includes(manifest: dict) -> list[dict]:
+    """Every composition edge the manifest declares, in its own order.
+
+    Separate from `entries()` on purpose: an include is never rewritten, and
+    keeping the two accessors apart means the rewrite cannot acquire one by
+    accident. What an include IS, for a reader asking what moved: a realm name,
+    a layer id on that realm's line, and the digest of that layer's signed
+    manifest.
+    """
+    return list(manifest.get("include", []))
 
 
 def repo_of(entry: dict) -> str:
