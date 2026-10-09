@@ -123,7 +123,9 @@ def lines(**table):
         answer = table[realm]
         if answer is None:
             return (False, [])
-        return (True, answer)
+        # (layer, digest) pairs: an include needs both, and a helper that
+        # yielded ids alone would let a half-proposal pass the tests.
+        return (True, [(x, f"sha256:{x.replace('.', '')}") for x in answer])
     return newer_layers
 
 
@@ -138,20 +140,35 @@ class CompositionEdges(unittest.TestCase):
     what let the realm appear healthy while standing still.
     """
 
-    def test_an_include_whose_line_moved_is_reported(self):
-        _, notes = scan_pins.plan(
+    def test_an_include_whose_line_moved_is_PROPOSED_with_its_digest(self):
+        """A complete edit, not a description of one.
+
+        This test used to assert the move landed in `needs_a_person` — a note
+        telling someone to go and type a layer id and a digest by hand. That is
+        the shape ruled out: a realm needing hand work per upstream move is a
+        realm that stops being maintained. The move is PROPOSED now, and a
+        pull request is the review the digest pin exists for.
+        """
+        updates, notes, edges = scan_pins.plan(
             edges_manifest(),
             fixed(),
             lines(**{"pulseengine": ["2026.10.5", "2026.10.8"],
                      "pulseengine-wasm": []}),
         )
-        self.assertEqual(len(notes), 1, notes)
-        self.assertIn("pulseengine", notes[0])
-        self.assertIn("2026.10.4", notes[0])
-        self.assertIn("2026.10.8", notes[0])
+        self.assertEqual(notes, [], "a derivable move is not a note")
+        self.assertEqual(updates, [], "an include never enters the payload rewrite")
+        self.assertEqual(len(edges), 1, edges)
+        realm, old_layer, old_digest, new_layer, new_digest = edges[0]
+        self.assertEqual(realm, "pulseengine")
+        self.assertEqual(old_layer, "2026.10.4")
+        # THE NEWEST, not the first one found.
+        self.assertEqual(new_layer, "2026.10.8")
+        # And the digest, which is the half that makes the pin a pin.
+        self.assertEqual(new_digest, "sha256:2026108")
+        self.assertNotEqual(old_digest, new_digest)
 
     def test_an_include_is_never_rewritten(self):
-        updates, _ = scan_pins.plan(
+        updates, _, _edges = scan_pins.plan(
             edges_manifest(),
             fixed(),
             lines(**{"pulseengine": ["2026.10.8"],
@@ -160,7 +177,7 @@ class CompositionEdges(unittest.TestCase):
         self.assertEqual(updates, [], "an include reached the rewrite list")
 
     def test_an_include_at_the_newest_layer_says_nothing(self):
-        _, notes = scan_pins.plan(
+        _, notes, _edges = scan_pins.plan(
             edges_manifest(),
             fixed(),
             lines(**{"pulseengine": [], "pulseengine-wasm": []}),
@@ -171,7 +188,7 @@ class CompositionEdges(unittest.TestCase):
         """A realm with no signed index cannot be asked, and that is a
         different fact from "nothing newer exists" — which is why
         `varve outdated` carries an `answerable` flag at all."""
-        _, notes = scan_pins.plan(
+        _, notes, _edges = scan_pins.plan(
             edges_manifest(),
             fixed(),
             lines(**{"pulseengine": [], "pulseengine-wasm": None}),
@@ -187,7 +204,7 @@ class CompositionEdges(unittest.TestCase):
         self.assertIn("Refusing to scan", str(caught.exception))
 
     def test_payload_scanning_is_unaffected_by_edges(self):
-        updates, notes = scan_pins.plan(
+        updates, notes, _edges = scan_pins.plan(
             tomllib.loads(MIXED),
             fixed(**{
                 "pulseengine/rivet": "v0.38.0", "pulseengine/spar": "v0.37.0",
@@ -196,7 +213,8 @@ class CompositionEdges(unittest.TestCase):
             lines(**{"pulseengine": ["2026.10.8"]}),
         )
         self.assertIn(("tool", "rivet", "version", "v0.37.0", "v0.38.0"), updates)
-        self.assertTrue(any("2026.10.8" in n for n in notes), notes)
+        self.assertEqual(len(_edges), 1, _edges)
+        self.assertEqual(_edges[0][3], "2026.10.8")
         self.assertFalse(
             any(u[0] == "include" for u in updates), "an include was rewritten"
         )
@@ -213,7 +231,7 @@ class Sections(unittest.TestCase):
     def test_a_section_nobody_has_thought_of_yet_is_scanned(self):
         m = tomllib.loads(MANIFEST + '\n[[widget]]\nname = "gizmo"\nversion = "v1.0.0"\n')
         self.assertIn("widget", scan_pins.sections(m))
-        updates, _ = scan_pins.plan(
+        updates, _, _edges = scan_pins.plan(
             m,
             fixed(**{
                 "pulseengine/rivet": "v0.37.0", "pulseengine/spar": "v0.37.0",
@@ -226,7 +244,7 @@ class Sections(unittest.TestCase):
 
 class WhatMoved(unittest.TestCase):
     def test_nothing_moved_when_every_pin_is_current(self):
-        updates, notes = scan_pins.plan(manifest(), fixed(**{
+        updates, notes, _edges = scan_pins.plan(manifest(), fixed(**{
             "pulseengine/rivet": "v0.37.0", "pulseengine/spar": "v0.37.0",
             "pulseengine/jess": "v0.7.2", "pulseengine/varve": "v0.36.0",
         }))
@@ -235,14 +253,14 @@ class WhatMoved(unittest.TestCase):
 
     def test_a_hub_payload_is_compared_on_its_RELEASE_not_its_version(self):
         # 0.2.2 != v0.7.2 is not movement: the payload's number is its own.
-        _, notes = scan_pins.plan(manifest(), fixed(**{
+        _, notes, _edges = scan_pins.plan(manifest(), fixed(**{
             "pulseengine/rivet": "v0.37.0", "pulseengine/spar": "v0.37.0",
             "pulseengine/jess": "v0.7.2", "pulseengine/varve": "v0.36.0",
         }))
         self.assertEqual(notes, [])
 
     def test_a_moved_hub_release_changes_nothing_and_asks_for_a_person(self):
-        updates, notes = scan_pins.plan(manifest(), fixed(**{
+        updates, notes, _edges = scan_pins.plan(manifest(), fixed(**{
             "pulseengine/rivet": "v0.37.0", "pulseengine/spar": "v0.37.0",
             "pulseengine/jess": "v0.8.0", "pulseengine/varve": "v0.36.0",
         }))
@@ -255,7 +273,7 @@ class WhatMoved(unittest.TestCase):
         self.assertIn("v0.8.0", notes[0])
 
     def test_a_crate_and_its_docs_move_in_both_fields(self):
-        updates, notes = scan_pins.plan(manifest(), fixed(**{
+        updates, notes, _edges = scan_pins.plan(manifest(), fixed(**{
             "pulseengine/rivet": "v0.37.0", "pulseengine/spar": "v0.37.0",
             "pulseengine/jess": "v0.7.2", "pulseengine/varve": "v0.37.0",
         }))
@@ -269,7 +287,7 @@ class WhatMoved(unittest.TestCase):
         self.assertIn(("docs", "varve-core-api", "version", "0.36.0", "0.37.0"), updates)
 
     def test_a_tool_and_a_vsix_move_on_version(self):
-        updates, _ = scan_pins.plan(manifest(), fixed(**{
+        updates, _, _edges = scan_pins.plan(manifest(), fixed(**{
             "pulseengine/rivet": "v0.38.0", "pulseengine/spar": "v0.37.0",
             "pulseengine/jess": "v0.7.2", "pulseengine/varve": "v0.36.0",
         }))

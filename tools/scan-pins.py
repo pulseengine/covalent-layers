@@ -111,7 +111,15 @@ def varve_newer_layers(varve_bin: str, realms_file: str, channel: str) -> "calla
             answer = json.loads(out.stdout)
             if not answer.get("answerable"):
                 return (False, [])
-            return (True, [n["layer"] for n in answer.get("newer", [])])
+            # THE DIGEST TOO. An `[[include]]` names a layer by the digest of
+            # its signed manifest, so a layer id alone is half a proposal —
+            # and the half that is missing is the one that makes the pin a
+            # pin. varve already returns it; dropping it here is what made
+            # this a report rather than a change to approve.
+            return (
+                True,
+                [(n["layer"], n["digest"]) for n in answer.get("newer", [])],
+            )
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -135,6 +143,10 @@ def plan(
     """
     updates: list[tuple] = []
     needs_a_person: list[str] = []
+    # Composition edges that moved, as (realm, old_layer, old_digest,
+    # new_layer, new_digest). Kept separate from `updates` so the payload
+    # rewriter cannot touch one by accident.
+    include_updates: list[tuple] = []
     for section in sections(manifest):
         for entry in manifest[section]:
             name = entry["name"]
@@ -191,14 +203,15 @@ def plan(
             continue
         if not newer:
             continue
-        needs_a_person.append(
-            f"include of realm '{realm}' pins layer {layer} and that line now "
-            f"holds {', '.join(newer)}. Nothing here rewrites it: an include "
-            f"names a layer by the digest of its signed manifest, and moving it "
-            f"is a decision about whose bytes this realm vouches for. A person "
-            f"states the new layer AND its digest."
+        # THE NEWEST, with its digest — a complete edit, not a description of
+        # one. Moving a composition remains a REVIEWED decision (see
+        # pins.NOT_PAYLOADS): this proposes it, and a pull request is the
+        # review. What was wrong was equating "reviewed" with "typed by hand".
+        newest_layer, newest_digest = newer[-1]
+        include_updates.append(
+            (realm, layer, edge["digest"], newest_layer, newest_digest)
         )
-    return updates, needs_a_person
+    return updates, needs_a_person, include_updates
 
 
 def apply_updates(text: str, updates: list[tuple]) -> str:
@@ -222,6 +235,44 @@ def apply_updates(text: str, updates: list[tuple]) -> str:
                 f"could not rewrite {section} '{name}' {field} ({old} -> {new}) — "
                 f"matched {n} times, expected exactly 1"
             )
+    return text
+
+
+def apply_include_updates(text: str, updates: list[tuple]) -> str:
+    """Move a composition edge: its layer id AND its digest, together.
+
+    Anchored on the realm name and on BOTH current values, so a half-applied
+    move is impossible. That matters more here than for a payload: an
+    `[[include]]` whose layer says one thing and whose digest says another is
+    not a stale pin, it is a manifest that names bytes nobody chose — and
+    varve would fetch the digest while a reader believes the layer id.
+
+    Each rewrite must match exactly once or this raises.
+    """
+    for realm, old_layer, old_digest, new_layer, new_digest in updates:
+        # The block for THIS realm, whatever order its keys appear in.
+        block = re.compile(
+            r'(\[\[include\]\][^\[]*?realm\s*=\s*"' + re.escape(realm) + r'"[^\[]*?)(?=\[\[|\Z)',
+            re.S,
+        )
+        m = block.search(text)
+        if m is None:
+            raise AssertionError(f"no [[include]] block for realm {realm!r}")
+        body = m.group(1)
+        for field, old, new in (
+            ("layer", old_layer, new_layer),
+            ("digest", old_digest, new_digest),
+        ):
+            pat = re.compile(
+                r'(' + re.escape(field) + r'\s*=\s*")' + re.escape(old) + r'(")'
+            )
+            body, n = pat.subn(r"\g<1>" + new + r"\g<2>", body, count=1)
+            if n != 1:
+                raise AssertionError(
+                    f"could not rewrite include {realm!r} {field} "
+                    f"({old} -> {new}) — matched {n} times, expected exactly 1"
+                )
+        text = text[: m.start(1)] + body + text[m.end(1) :]
     return text
 
 
@@ -276,9 +327,9 @@ def main(argv: list[str]) -> int:
             varve_bin, realms, manifest["realm"]["channel"]
         )
 
-    updates, needs_a_person = [], []
+    updates, needs_a_person, include_updates = [], [], []
     try:
-        updates, needs_a_person = plan(manifest, latest, newer_layers)
+        updates, needs_a_person, include_updates = plan(manifest, latest, newer_layers)
     except RuntimeError:
         pass  # a failed query; reported below, and nothing is trusted
 
@@ -297,11 +348,13 @@ def main(argv: list[str]) -> int:
     for note in needs_a_person:
         print(f"::warning::{note}", file=sys.stderr)
 
-    if apply and updates:
+    if apply and (updates or include_updates):
         with open(MANIFEST) as f:
             text = f.read()
+        text = apply_updates(text, updates)
+        text = apply_include_updates(text, include_updates)
         with open(MANIFEST, "w") as f:
-            f.write(apply_updates(text, updates))
+            f.write(text)
         # Re-read with the real parser: a rewrite that produced something the
         # assembler cannot read would fail later, in the signing half.
         with open(MANIFEST, "rb") as f:
@@ -309,12 +362,19 @@ def main(argv: list[str]) -> int:
         for section, name, field, _old, new in updates:
             entry = next(e for e in again[section] if e["name"] == name)
             assert entry[field] == new, f"{section} '{name}' {field} did not take"
+        for realm, _ol, _od, new_layer, new_digest in include_updates:
+            edge = next(e for e in again.get("include", []) if e["realm"] == realm)
+            assert edge["layer"] == new_layer, f"include {realm} layer did not take"
+            assert edge["digest"] == new_digest, f"include {realm} digest did not take"
 
     for row in updates:
         print("\t".join(row))
+    for realm, old_layer, _od, new_layer, _nd in include_updates:
+        print("\t".join(("include", realm, "layer", old_layer, new_layer)))
     print(
-        f"{len(updates)} pin(s) moved, {len(needs_a_person)} needing a person "
-        f"({len(manifest.get('include', []))} composition edge(s) examined)",
+        f"{len(updates)} pin(s) moved, {len(include_updates)} composition "
+        f"edge(s) moved, {len(needs_a_person)} needing a person "
+        f"({len(manifest.get('include', []))} edge(s) examined)",
         file=sys.stderr,
     )
     return 0

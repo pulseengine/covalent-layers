@@ -1,0 +1,222 @@
+name: Scan upstream and propose
+
+# Ask each pinned upstream for its latest release, PREPARE what moved, and open
+# a pull request. It does not push to main and it does not deposit.
+#
+# THIS USED TO DEPOSIT WITH NOBODY IN THE LOOP, and the comment here used to
+# argue for that: a signed, published, immutable layer within fifteen minutes,
+# with the judgement a person was making — whether this particular upstream
+# release belongs in the toolchain — simply removed. That trade is no longer
+# necessary, because the thing that made review expensive was never the review.
+# It was that a scanner could only REPORT what it could not rewrite, so a
+# person had to go and derive values by hand: a payload version from release
+# notes, an opt-in reason re-measured, a composition's layer id and digest
+# looked up. In this realm that was every single entry.
+#
+# Now the proposal is complete and the review is a diff (varve
+# REQ-PREPARED-001). Nothing here is guessed:
+#
+#   * a payload version comes from the release tag where the tag implies it,
+#     and otherwise from the asset names the release actually publishes;
+#   * a composition edge carries the new layer id AND its manifest digest, both
+#     read from the included realm's SIGNED line index — never from a tag
+#     listing, because a registry that hides a layer is undetectable that way;
+#   * where no derivation applies, that is reported with the specific reason and
+#     never as a bump.
+#
+# The controls this depends on, none of which a pull request weakens:
+#
+#   * `varve-producer plan` accepts the rewritten manifest BEFORE the commit is
+#     allowed to exist. A manifest varve refuses must not be able to land:
+#     `scan` reads through the same parser, so a refused manifest on main would
+#     leave this realm unable even to be scanned.
+#   * `scan-pins.py` fails loud — a repository or a realm it cannot ask is an
+#     error, never "nothing moved". A silent scanner freezes the realm while
+#     looking healthy.
+#   * `next-layer-id.sh` derives the id and counter from the PUBLISHED record
+#     and refuses if the registry cannot be read or the tag already exists.
+#   * `varve-producer deposit` verifies every upstream release against its own
+#     repository's cosign identity before staging a byte, and the deposit
+#     sanity-installs and VERIFIES the layer against the realm's published root
+#     before anything is pushed.
+#   * `publish-check` refuses to replace a published id with different bytes.
+#
+# A layer id once spent cannot be reused — varve has no revocation and no
+# deletion — which is why the decision to spend one is a merge, by a person,
+# and `deposit-on-merge.yml` is what acts on it.
+
+concurrency:
+  # One scan at a time. This no longer deposits, so the old reason — two runs
+  # deriving the same next layer id and both publishing it — has moved to
+  # `deposit-on-merge.yml`, which carries its own group. What remains here is
+  # simpler: two scans would propose two near-identical branches, and a queue
+  # of unreviewed proposals is how a review step stops being a review.
+  group: scan-and-propose
+  cancel-in-progress: false
+
+on:
+  # A SCHEDULE AT LAST, and the decision this file said was not yet taken is
+  # now taken: this realm scans on a clock, and what it finds arrives as a
+  # PULL REQUEST rather than as a signed layer. That is what changed. The cost
+  # pulseengine-layers wrote down in its DD-030 — nobody decides whether a
+  # particular upstream release belongs in the toolchain, and varve has no
+  # revocation — does not apply to a proposal, because a person decides by
+  # merging it.
+  #
+  # HOURLY, and honestly so. pulseengine-layers declares `7,22,37,52 * * * *`
+  # and GitHub coalesces high-frequency schedules: that "15-minute" scanner
+  # actually fires 4-6 times a day. A stated cadence nobody achieves is worse
+  # than a slower one that holds.
+  schedule:
+    - cron: "41 * * * *"
+  # THE REAL TRIGGER. A tool repository that publishes a release dispatches
+  # here, so latency does not depend on GitHub's scheduling mood and the cron
+  # is a backstop rather than the mechanism.
+  repository_dispatch:
+    types: [upstream-released]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  # To OPEN the proposal. Note what is ABSENT now: this workflow no longer
+  # pushes to main and no longer dispatches the deposit. It proposes; a person
+  # merges; `deposit-on-merge.yml` signs.
+  pull-requests: write
+  actions: write
+
+jobs:
+  scan:
+    name: what moved upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # This manifest is ALL composition edges, so without varve here the
+      # scanner has nothing it can legitimately say. An include moved or not is
+      # answerable only from the included realm's SIGNED line index, which
+      # varve verifies against that realm's trust root; a registry tag listing
+      # cannot tell "there is nothing newer" from "I am not telling you". The
+      # scanner now REFUSES rather than examining payloads alone and calling
+      # that a scan, so this step is not optional.
+      - name: fetch the varve this manifest pins
+        id: varve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VER="$(python3 -c "import tomllib;print(tomllib.load(open('layer.toml','rb'))['varve']['version'])")"
+          echo "varve $VER (pinned in layer.toml)"
+          mkdir -p .varve
+          # Named assets, not a `varve-*` glob: the glob also matches
+          # varve-producer, and which archive a later `find` picked would be a
+          # matter of directory order.
+          gh release download "$VER" --repo pulseengine/varve -D .varve \
+            -p "varve-$VER-x86_64-unknown-linux-gnu.tar.gz" \
+            -p "varve-producer-$VER-x86_64-unknown-linux-gnu.tar.gz" \
+            -p "varve-realms.toml"
+          mkdir -p .varve/v .varve/p
+          tar xzf ".varve/varve-$VER-x86_64-unknown-linux-gnu.tar.gz" -C .varve/v
+          tar xzf ".varve/varve-producer-$VER-x86_64-unknown-linux-gnu.tar.gz" -C .varve/p
+          install -m 0755 "$(find .varve/v -name varve -type f -perm -u+x | head -1)" .varve/varve-bin
+          # The ASSEMBLER too, because the rewrite has to be validated by the
+          # program that will later read it. A scanner that validates with its
+          # own idea of the schema is a second opinion, and the one that counts
+          # is the one that signs.
+          install -m 0755 "$(find .varve/p -name varve-producer -type f -perm -u+x | head -1)" .varve/producer-bin
+          echo "bin=$PWD/.varve/varve-bin"            >> "$GITHUB_OUTPUT"
+          echo "producer=$PWD/.varve/producer-bin"    >> "$GITHUB_OUTPUT"
+          echo "realms=$PWD/.varve/varve-realms.toml" >> "$GITHUB_OUTPUT"
+          # The realms file carries the TRUST ROOT an included realm's index is
+          # verified against. Taken from the release rather than committed here,
+          # because the rolling root rotates and a stale copy would fail closed
+          # on every scan with a signature error that looks like an attack.
+          test -s .varve/varve-realms.toml
+
+      - name: ask every pinned repository for its latest release, and bump what moved
+        id: scan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VARVE_BIN: ${{ steps.varve.outputs.bin }}
+          VARVE_REALMS: ${{ steps.varve.outputs.realms }}
+        run: |
+          set -euo pipefail
+          # ONE reader and ONE writer of layer.toml. The rewrite used to live
+          # here as an inline heredoc that knew only about `[[tool]]`, while the
+          # scanner read the manifest — two places deciding which sections
+          # exist, and the drift was only visible in a signed layer. It scanned
+          # `[[tool]]` alone, so the `[[crate]]` and `[[docs]]` entries this
+          # realm now carries would have frozen at 0.36.0 with nothing saying
+          # so; and it compared `version` against the latest tag, so the hub
+          # payload `with-device` (0.2.2 from release v0.7.2) was "moved" on
+          # every scan and would have been signed as version v0.7.2.
+          python3 tools/scan-pins.py --apply > moved.tsv
+          if [ -s moved.tsv ]; then
+            echo "moved=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$(wc -l < moved.tsv | tr -d ' ') pin(s) moved upstream"
+            cat moved.tsv
+          else
+            echo "moved=false" >> "$GITHUB_OUTPUT"
+            # NOT "nothing moved". That is what this job printed through four
+            # layers of drift, because an empty rewrite list was read as a
+            # healthy realm. A composition edge that moved, or one that cannot
+            # be asked, is reported as a ::warning:: above and rewrites
+            # nothing — so an empty list here means only that nothing was
+            # AUTOMATICALLY bumpable.
+            echo "no pin was rewritten — read the warnings above before concluding the realm is current"
+          fi
+
+      # THE GATE, and it stands between the rewrite and anything durable.
+      #
+      # `scan-pins.py --apply` has already rewritten layer.toml in the
+      # workspace. Validating here with the ASSEMBLER means a manifest varve
+      # would refuse cannot reach a commit — and that matters more than one
+      # failed job: `varve-producer scan` reads through `parse_layer_manifest`,
+      # so a refused manifest on main leaves the realm unable even to be
+      # SCANNED until a person repairs it by hand.
+      - name: refuse to propose a manifest varve would not accept
+        if: steps.scan.outputs.moved == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER: ${{ steps.varve.outputs.producer }}
+        run: |
+          set -euo pipefail
+          if ! "$PRODUCER" plan --manifest layer.toml; then
+            echo "::error::the rewrite produced a manifest varve refuses — not proposing it"
+            echo "::error::this is the scan's own output, so the bug is here, not upstream"
+            exit 1
+          fi
+          echo "::notice::the rewritten manifest plans cleanly"
+
+      # A PULL REQUEST, never a push to main. Two reasons, and the first is not
+      # about taste: a refused manifest must be unable to land, and review is
+      # what a digest pin on an `[[include]]` exists for — moving a composition
+      # decides whose bytes this realm vouches for. A pull request IS that
+      # review. What was wrong before was equating "reviewed" with "typed by
+      # hand" (varve REQ-PREPARED-001).
+      - name: propose it
+        if: steps.scan.outputs.moved == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BRANCH="scanner/pins-$(date -u +%Y%m%d-%H%M%S)"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add layer.toml
+          BODY="$(awk -F'\t' '{printf "  %s %s %s: %s -> %s\n", $1, $2, $3, $4, $5}' moved.tsv)"
+          git commit -m "$(printf 'Pins moved upstream\n\n%s\n\nProposed by the scanner. Every value here was DERIVED, not guessed: a\nversion from the release tag or from the asset names upstream publishes, a\ncomposition edge from the realm signed line index (layer id and digest\ntogether). Validated with `varve-producer plan` before this commit was\nallowed to exist.' "$BODY")"
+          git push -u origin "$BRANCH"
+
+          # Reuse an open proposal rather than stacking one per tick: the
+          # scanner runs on a schedule and an unreviewed queue of near-identical
+          # PRs is how a review step stops being a review.
+          EXISTING="$(gh pr list --state open --search 'head:scanner/pins- in:title Pins moved upstream' --json number --jq '.[0].number // empty')"
+          if [ -n "$EXISTING" ]; then
+            echo "::notice::#$EXISTING is already proposing a pin move; closing it in favour of this one"
+            gh pr close "$EXISTING" --comment "Superseded by a newer scan." || true
+          fi
+
+          gh pr create --title "Pins moved upstream" --body "$(printf 'The scanner found upstream movement and prepared it.\n\n```\n%s\n```\n\n**Every value here was derived, not guessed.** A payload version comes from\nthe release tag where the tag implies it, or from the asset names the release\nactually publishes. A composition edge carries the new layer id AND its\nmanifest digest, both read from the included realm signed line index — not\nfrom a tag listing, because a registry that hides a layer is undetectable that\nway.\n\n`varve-producer plan` accepted this manifest before the commit was allowed to\nexist, so a manifest varve would refuse cannot reach main. That matters\nbecause `scan` itself reads through the manifest parser: a refused manifest on\nmain leaves this realm unable even to be scanned.\n\n**Merging this deposits the layer.** `deposit-on-merge.yml` derives the next\nlayer id and counter from the published record and dispatches the deposit. A\nlayer id once spent cannot be reused, so review the diff rather than the\nsummary.' "$BODY")"
+          echo "::notice::proposed — review and merge to deposit"
