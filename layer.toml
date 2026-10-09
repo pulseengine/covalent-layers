@@ -32,7 +32,26 @@
 # promote them by hand before verifying. v0.39.0 is the first release where
 # this layer installs correctly from one command, which is the only reason
 # this layer exists.
-version = "v0.39.0"
+#
+# v0.41.0, not v0.39.0: THE SCANNER NEEDS `varve outdated`, which does not
+# exist before v0.40.0. This realm's manifest is nothing but composition edges,
+# and whether one has moved is answerable only from the included realm's SIGNED
+# line index — which `outdated` reads and verifies. Pinned at v0.39.0 the
+# scanner's probe exited 2 with "unrecognized subcommand 'outdated'".
+#
+# Measured 2026-10-09, on the first real scan after the propose-a-PR workflow
+# landed: both edges were reported as "that realm publishes no signed line
+# index", the run was GREEN, and nothing was proposed. pulseengine publishes
+# line-index-2026.10 and answers in seconds. The scanner was reading a broken
+# probe as an answer about the upstream — fixed in tools/scan-pins.py, which
+# now refuses loudly rather than inventing a fact about another realm.
+#
+# This pin was deliberately NOT bumped when the other two realms moved to
+# v0.41.0, on the reasoning that a composition carries no payloads so the libc
+# measurement and the provenance fix change nothing for it. That reasoning was
+# incomplete: it accounted for what the layer CONTAINS and not for what the
+# repository's own tooling runs.
+version = "v0.41.0"
 
 [realm]
 name     = "covalent"

@@ -184,6 +184,28 @@ class CompositionEdges(unittest.TestCase):
         )
         self.assertEqual(notes, [])
 
+    def test_a_broken_probe_is_an_error_not_a_claim_about_the_upstream(self):
+        """THE one that was missing, and it cost a green run that did nothing.
+
+        `varve outdated` exits 0 and says "cannot answer", carrying
+        `answerable: false` so the two states are distinguishable. A NON-ZERO
+        exit means the probe could not run at all.
+
+        The first real scan pinned varve v0.39.0, where `outdated` does not
+        exist — exit 2, "unrecognized subcommand". The scanner reported both
+        covalent edges as "that realm publishes no signed line index", which is
+        a false statement about pulseengine, and proposed nothing while looking
+        healthy.
+
+        So a checker that raises must propagate, not be absorbed into a note.
+        """
+        def broken(realm, layer):
+            raise RuntimeError("`varve outdated` failed (exit 2)")
+
+        with self.assertRaises(RuntimeError) as caught:
+            scan_pins.plan(edges_manifest(), fixed(), broken)
+        self.assertIn("exit 2", str(caught.exception))
+
     def test_an_unanswerable_include_is_reported_not_treated_as_unmoved(self):
         """A realm with no signed index cannot be asked, and that is a
         different fact from "nothing newer exists" — which is why
