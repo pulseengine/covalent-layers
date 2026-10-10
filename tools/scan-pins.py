@@ -103,12 +103,45 @@ def varve_newer_layers(varve_bin: str, realms_file: str, channel: str) -> "calla
                 cwd=work, capture_output=True, text=True,
                 env={**os.environ, "VARVE_STORE": os.path.join(work, "store")},
             )
-            if out.returncode != 0 or not out.stdout.strip():
-                # Not an error here: varve exits non-zero when it cannot
-                # answer, and "cannot answer" is a reportable state, not a
-                # crash. The caller turns it into a note for a person.
-                return (False, [])
-            answer = json.loads(out.stdout)
+            # A BROKEN PROBE IS NOT AN ANSWER, and conflating the two is how
+            # this scanner reported a healthy realm while proposing nothing.
+            #
+            # The previous version returned "cannot answer" for any non-zero
+            # exit, on the stated belief that varve exits non-zero when it
+            # cannot answer. IT DOES NOT: `varve outdated` exits 0 and says
+            # "cannot answer", carrying `answerable: false` in its JSON
+            # precisely so the two are distinguishable. So a non-zero exit
+            # means the probe FAILED — no network, no credentials, a realms
+            # file that does not parse — and dressing that up as "this realm
+            # publishes no index" is a false claim about the upstream.
+            #
+            # Measured 2026-10-09: the first real scan reported BOTH covalent
+            # edges as having no signed index. pulseengine publishes
+            # line-index-2026.10 and answers in seconds from a laptop. The run
+            # was green and proposed nothing.
+            if out.returncode != 0:
+                raise RuntimeError(
+                    f"`varve outdated` failed for realm {realm!r} layer {layer!r} "
+                    f"(exit {out.returncode}). This is NOT 'no index exists' — it "
+                    f"is a probe that could not run, and reporting it as the "
+                    f"former would be a false claim about that realm.\n"
+                    f"  stdout: {out.stdout.strip()[:400]}\n"
+                    f"  stderr: {out.stderr.strip()[:400]}"
+                )
+            if not out.stdout.strip():
+                raise RuntimeError(
+                    f"`varve outdated` exited 0 but printed nothing for realm "
+                    f"{realm!r} layer {layer!r}. An empty answer is not an "
+                    f"answer.\n  stderr: {out.stderr.strip()[:400]}"
+                )
+            try:
+                answer = json.loads(out.stdout)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(
+                    f"`varve outdated` printed something that is not JSON for "
+                    f"realm {realm!r}: {e}\n  stdout: {out.stdout.strip()[:400]}"
+                ) from e
+            # ONLY THIS is "cannot answer": varve ran, and said so itself.
             if not answer.get("answerable"):
                 return (False, [])
             # THE DIGEST TOO. An `[[include]]` names a layer by the digest of
