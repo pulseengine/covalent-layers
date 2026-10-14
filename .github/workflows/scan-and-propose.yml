@@ -211,13 +211,32 @@ jobs:
         run: |
           set -euo pipefail
           BRANCH="scanner/pins-$(date -u +%Y%m%d-%H%M%S)"
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$BRANCH"
-          git add layer.toml
           BODY="$(awk -F'\t' '{printf "  %s %s %s: %s -> %s\n", $1, $2, $3, $4, $5}' moved.tsv)"
-          git commit -m "$(printf 'Pins moved upstream\n\n%s\n\nProposed by the scanner. Every value here was DERIVED, not guessed: a\nversion from the release tag or from the asset names upstream publishes, a\ncomposition edge from the realm signed line index (layer id and digest\ntogether). Validated with `varve-producer plan` before this commit was\nallowed to exist.' "$BODY")"
-          git push -u origin "$BRANCH"
+          # A SIGNED commit, made by GitHub. Covalent's main requires
+          # signatures, and a `git commit` on the runner is unsigned — the
+          # first proposal (#19) could not be merged for exactly that reason.
+          # `createCommitOnBranch` with the workflow token yields a commit
+          # GitHub signs; checked below rather than assumed.
+          BASE="$(git rev-parse HEAD)"
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$BASE" > /dev/null
+          MSG="$(printf '%s\n\nProposed by the scanner. Every value here was DERIVED, not guessed: a\nversion from the release tag or from the asset names upstream publishes, a\ncomposition edge from the realm signed line index (layer id and digest\ntogether). Validated with `varve-producer plan` before this commit was\nallowed to exist.' "$BODY")"
+          jq -n \
+            --arg repo "$GITHUB_REPOSITORY" --arg branch "$BRANCH" --arg oid "$BASE" \
+            --arg body "$MSG" --arg contents "$(base64 -w0 layer.toml)" \
+            '{query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
+              variables: {input: {
+                branch: {repositoryNameWithOwner: $repo, branchName: $branch},
+                expectedHeadOid: $oid,
+                message: {headline: "Pins moved upstream", body: $body},
+                fileChanges: {additions: [{path: "layer.toml", contents: $contents}]}}}}' \
+            | gh api graphql --input - > commit.json
+          OID="$(jq -r '.data.createCommitOnBranch.commit.oid' commit.json)"
+          test -n "$OID" && test "$OID" != null || { cat commit.json; exit 1; }
+          VERIFIED="$(gh api "repos/$GITHUB_REPOSITORY/commits/$OID" --jq '.commit.verification.verified')"
+          test "$VERIFIED" = true || {
+            echo "::error::the proposal commit $OID is not signed (verified=$VERIFIED); main requires signatures, so it could not be merged"
+            exit 1
+          }
 
           # Reuse an open proposal rather than stacking one per tick: the
           # scanner runs on a schedule and an unreviewed queue of near-identical
@@ -228,5 +247,5 @@ jobs:
             gh pr close "$EXISTING" --comment "Superseded by a newer scan." || true
           fi
 
-          gh pr create --title "Pins moved upstream" --body "$(printf 'The scanner found upstream movement and prepared it.\n\n```\n%s\n```\n\n**Every value here was derived, not guessed.** A payload version comes from\nthe release tag where the tag implies it, or from the asset names the release\nactually publishes. A composition edge carries the new layer id AND its\nmanifest digest, both read from the included realm signed line index — not\nfrom a tag listing, because a registry that hides a layer is undetectable that\nway.\n\n`varve-producer plan` accepted this manifest before the commit was allowed to\nexist, so a manifest varve would refuse cannot reach main. That matters\nbecause `scan` itself reads through the manifest parser: a refused manifest on\nmain leaves this realm unable even to be scanned.\n\n**Merging this deposits the layer.** `deposit-on-merge.yml` derives the next\nlayer id and counter from the published record and dispatches the deposit. A\nlayer id once spent cannot be reused, so review the diff rather than the\nsummary.' "$BODY")"
+          gh pr create --head "$BRANCH" --title "Pins moved upstream" --body "$(printf 'The scanner found upstream movement and prepared it.\n\n```\n%s\n```\n\n**Every value here was derived, not guessed.** A payload version comes from\nthe release tag where the tag implies it, or from the asset names the release\nactually publishes. A composition edge carries the new layer id AND its\nmanifest digest, both read from the included realm signed line index — not\nfrom a tag listing, because a registry that hides a layer is undetectable that\nway.\n\n`varve-producer plan` accepted this manifest before the commit was allowed to\nexist, so a manifest varve would refuse cannot reach main. That matters\nbecause `scan` itself reads through the manifest parser: a refused manifest on\nmain leaves this realm unable even to be scanned.\n\n**Merging this deposits the layer.** `deposit-on-merge.yml` derives the next\nlayer id and counter from the published record and dispatches the deposit. A\nlayer id once spent cannot be reused, so review the diff rather than the\nsummary.' "$BODY")"
           echo "::notice::proposed — review and merge to deposit"
