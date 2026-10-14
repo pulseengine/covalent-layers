@@ -361,10 +361,41 @@ def main(argv: list[str]) -> int:
         )
 
     updates, needs_a_person, include_updates = [], [], []
+    # A REFUSAL THE CALLER EATS IS NOT A REFUSAL.
+    #
+    # This used to be a bare `pass`, written when the only RuntimeError `plan`
+    # could raise came from `latest()` — which records its own reason in
+    # `failures` and is reported below, so swallowing the exception lost
+    # nothing. Then the include checker learned to raise when its probe could
+    # not run, and that error went into the same `pass` and vanished: the run
+    # reported "0 moved, 0 needing a person", exited 0, and looked healthy
+    # while having examined nothing.
+    #
+    # Measured 2026-10-14: a scan said exactly that while the composition
+    # pinned pulseengine 2026.10.4 and that line held 2026.10.15. The same
+    # scanner, run by hand, proposed the move correctly — the difference was
+    # entirely this line.
+    #
+    # So anything raised here that `failures` does not already explain is a
+    # probe that could not run, and it stops the scan.
+    probe_failures: list[str] = []
     try:
         updates, needs_a_person, include_updates = plan(manifest, latest, newer_layers)
-    except RuntimeError:
-        pass  # a failed query; reported below, and nothing is trusted
+    except RuntimeError as e:
+        if not failures:
+            probe_failures.append(str(e))
+
+    if probe_failures:
+        for f in dict.fromkeys(probe_failures):
+            print(f"::error::{f}", file=sys.stderr)
+        print(
+            "::error::refusing to report movement from a scan that could not "
+            "complete its probes — 'I could not ask' is not 'nothing moved', "
+            "and this job exiting 0 is how a realm stands still while every "
+            "check stays green",
+            file=sys.stderr,
+        )
+        return 1
 
     if failures:
         for f in dict.fromkeys(failures):
