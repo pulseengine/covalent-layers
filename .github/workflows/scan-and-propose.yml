@@ -118,13 +118,23 @@ jobs:
           mkdir -p .varve/v .varve/p
           tar xzf ".varve/varve-$VER-x86_64-unknown-linux-gnu.tar.gz" -C .varve/v
           tar xzf ".varve/varve-producer-$VER-x86_64-unknown-linux-gnu.tar.gz" -C .varve/p
-          install -m 0755 "$(find .varve/v -name varve -type f -perm -u+x | head -1)" .varve/varve-bin
+          # NAMED `varve`, and nothing else. varve reads the name it was
+          # invoked under: as `varve` it is the CLI, under any other name it is
+          # the SHIM for a tool of that name. Installed as `varve-bin`, every
+          # `outdated` probe ran as "the tool varve-bin from the pinned layer"
+          # and failed with "layer 2026.10.4 is not installed", which the
+          # scanner (correctly) refused to read as "nothing moved".
+          mkdir -p .varve/bin
+          install -m 0755 "$(find .varve/v -name varve -type f -perm -u+x | head -1)" .varve/bin/varve
+          # Proven here, not assumed: a binary that dispatches as a shim cannot
+          # print its own version.
+          .varve/bin/varve --version | grep -q '^varve '
           # The ASSEMBLER too, because the rewrite has to be validated by the
           # program that will later read it. A scanner that validates with its
           # own idea of the schema is a second opinion, and the one that counts
           # is the one that signs.
           install -m 0755 "$(find .varve/p -name varve-producer -type f -perm -u+x | head -1)" .varve/producer-bin
-          echo "bin=$PWD/.varve/varve-bin"            >> "$GITHUB_OUTPUT"
+          echo "bin=$PWD/.varve/bin/varve"            >> "$GITHUB_OUTPUT"
           echo "producer=$PWD/.varve/producer-bin"    >> "$GITHUB_OUTPUT"
           echo "realms=$PWD/.varve/varve-realms.toml" >> "$GITHUB_OUTPUT"
           # The realms file carries the TRUST ROOT an included realm's index is
