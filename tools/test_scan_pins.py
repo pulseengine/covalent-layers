@@ -413,3 +413,78 @@ class TheRealManifest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class MainRefuses(unittest.TestCase):
+    """`plan` raising was tested. `main` EATING it was not, and that is where
+    the scan went green while examining nothing.
+
+    The unit tests all drove `plan` directly, so every refusal they proved was
+    one the caller then discarded. These drive `main`, which is what the
+    workflow actually runs.
+    """
+
+    def _realm(self, tmp):
+        (tmp / "layer.toml").write_text(
+            '[varve]\nversion = "v0.41.0"\n\n'
+            '[realm]\nname = "covalent"\nchannel = "rolling"\n'
+            'registry = "oci://ghcr.io/pulseengine/covalent-layers"\n\n'
+            '[[include]]\nrealm = "pulseengine"\nlayer = "2026.10.4"\n'
+            'digest = "sha256:aaaa"\n'
+        )
+
+    def test_a_probe_that_cannot_run_exits_non_zero(self):
+        """`/bin/false` stands in for any varve that cannot answer: too old to
+        have `outdated`, no network, no credentials. Exit 0 here is the bug."""
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = pathlib.Path(d)
+            self._realm(tmp)
+            realms = tmp / "varve-realms.toml"
+            realms.write_text("[realm.pulseengine]\nregistry = \"oci://x/y\"\n")
+            # WRITTEN, not borrowed. The first version used `/bin/false`, which
+            # does not exist on macOS — so it took the missing-binary path,
+            # returned 1 for the wrong reason, and passed while the bug it was
+            # written for was restored. A negative control caught that.
+            stub = tmp / "varve-too-old"
+            stub.write_text(
+                "#!/bin/sh\n"
+                "echo \"error: unrecognized subcommand 'outdated'\" >&2\n"
+                "exit 2\n"
+            )
+            stub.chmod(0o755)
+            cwd = os.getcwd()
+            env = dict(os.environ)
+            try:
+                os.chdir(tmp)
+                os.environ["VARVE_BIN"] = str(stub)
+                os.environ["VARVE_REALMS"] = str(realms)
+                rc = scan_pins.main(["scan-pins.py"])
+            finally:
+                os.chdir(cwd)
+                os.environ.clear()
+                os.environ.update(env)
+        self.assertEqual(
+            rc, 1,
+            "a scan whose probe could not run must not exit 0 — that is how a "
+            "realm stands still while every check stays green",
+        )
+
+    def test_a_missing_varve_bin_refuses_before_scanning(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = pathlib.Path(d)
+            self._realm(tmp)
+            cwd = os.getcwd()
+            env = dict(os.environ)
+            try:
+                os.chdir(tmp)
+                os.environ.pop("VARVE_BIN", None)
+                os.environ.pop("VARVE_REALMS", None)
+                rc = scan_pins.main(["scan-pins.py"])
+            finally:
+                os.chdir(cwd)
+                os.environ.clear()
+                os.environ.update(env)
+        self.assertEqual(rc, 1, "no way to ask is not 'nothing moved'")
