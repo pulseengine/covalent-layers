@@ -160,6 +160,7 @@ jobs:
           LAYER: ${{ inputs.layer }}
           COUNTER: ${{ inputs.counter }}
           CHANNEL: ${{ steps.pins.outputs.channel }}
+          REPO: ${{ steps.pins.outputs.repo }}
         shell: bash
         run: |
           set -euo pipefail
@@ -186,8 +187,35 @@ jobs:
           # human enters each release drifts, and every value looks plausible.
           SUPPORT_UNTIL="$("$VARVE" support-horizon --channel "$CHANNEL" --issued-at "$ISSUED_AT")"
           echo "::notice::layer $LAYER supported until $SUPPORT_UNTIL ($CHANNEL policy)"
-          printf '{"line":"%s","counter":%s,"issued-at":"%s","support-until":"%s"}\n' \
-            "$LINE" "$COUNTER" "$ISSUED_AT" "$SUPPORT_UNTIL" > baseline-status.json
+          # CARRY THE LINE'S PUBLISHED STATEMENT FORWARD. This baseline used
+          # to say only line/counter/issued-at/support-until, with a counter
+          # that outranked the line's published line-status — so every
+          # consumer of this layer lost every known problem and yank the line
+          # had (found 2026-10-15). It now starts from the published document
+          # and sits above its counter (tools/line-status.py carry-forward).
+          oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin <<< "$GH_TOKEN"
+          oras repo tags "$REPO" > status-tags.txt
+          : > published-status.json
+          if grep -qx "line-status-$LINE" status-tags.txt; then
+            oras manifest fetch "$REPO:line-status-$LINE" > psm.json
+            PD=$(jq -r '[.layers[]|select(.annotations["eu.pulseengine.varve.role"]=="line-status")][0].digest' psm.json)
+            oras blob fetch --output published-status.dsse "$REPO@$PD"
+            # Read, not trusted: this realm's own root must have signed it,
+            # or carrying it forward would launder whatever the registry served.
+            mkdir -p ps-check
+            printf 'manifest-version = 1\n[toolchain]\nchannel = "%s"\nlayer = "%s"\n' "$CHANNEL" "$LAYER" > ps-check/varve.toml
+            ( cd ps-check && VARVE_ROOT="$RUNNER_TEMP/ps-root" VARVE_TRUST_ROOT="$GITHUB_WORKSPACE/realm-root.pub" \
+                "$GITHUB_WORKSPACE/$VARVE" status --from-file "$GITHUB_WORKSPACE/published-status.dsse" > /dev/null ) || {
+              RC=$?; [ "$RC" = 3 ] || { echo "::error::the published line-status for $LINE does not verify (exit $RC)"; exit 1; }; }
+            jq -r .payload published-status.dsse | base64 -d > published-status.json
+          fi
+          # Content from the COMMITTED document when there is one: a registry
+          # that withholds the tag must not make this deposit drop it.
+          python3 tools/line-status.py carry-forward --published published-status.json \
+            --repo-file "line-status/$LINE.json" \
+            --line "$LINE" --counter "$COUNTER" --issued-at "$ISSUED_AT" \
+            --support-until "$SUPPORT_UNTIL" > baseline-status.json
+          echo "::notice::baseline for $LAYER carries $(jq '(."known-problems" // []) | length' baseline-status.json) known problem(s) at counter $(jq .counter baseline-status.json)"
           "$VARVE" sign-status \
             --file baseline-status.json \
             --key <(printf '%s' "$VARVE_COVALENT_KEY") --key-id covalent-1 \
