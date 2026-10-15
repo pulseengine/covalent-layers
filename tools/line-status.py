@@ -70,32 +70,54 @@ def plan_publish(repo: dict, published: dict | None, *, newest_baseline: int,
 
 
 def _says_more(published: dict, repo: dict) -> bool:
-    """Does the published document state anything the repo's does not?"""
-    repo_ids = {p["id"] for p in repo.get("known-problems", [])}
-    if any(p["id"] not in repo_ids for p in published.get("known-problems", [])):
-        return True
+    """Does the published document state anything the repo's would drop?
+
+    Strict, because the cost is asymmetric: publishing over a document that
+    said more silently withdraws a warning consumers already had. Wording
+    (title, workaround, severity) may change; WHAT is warned about may only
+    grow — every published problem id with every layer it named, every
+    yank, a window no later than published, a floor no lower.
+    """
+    repo_kps = {p["id"]: set(p.get("affected", [])) for p in repo.get("known-problems", [])}
+    for p in published.get("known-problems", []):
+        if p["id"] not in repo_kps or not set(p.get("affected", [])) <= repo_kps[p["id"]]:
+            return True
     repo_yanked = repo.get("yanked", {})
-    return any(layer not in repo_yanked for layer in published.get("yanked", {}))
+    if any(layer not in repo_yanked for layer in published.get("yanked", {})):
+        return True
+    pub_until, repo_until = published.get("support-until"), repo.get("support-until")
+    if pub_until and (not repo_until or repo_until > pub_until):
+        return True
+    return int(published.get("min-counter") or 0) > int(repo.get("min-counter") or 0)
 
 
 def carry_forward(published: dict | None, *, line: str, counter: int,
-                  issued_at: str, support_until: str) -> dict:
-    """The baseline a deposit attaches: its own window, the line's problems."""
+                  issued_at: str, support_until: str, repo: dict | None = None) -> dict:
+    """The baseline a deposit attaches: its own window, the line's problems.
+
+    The CONTENT comes from the committed document when there is one — it is
+    the approved statement, and a registry that withholds `line-status-<line>`
+    must not be able to make a deposit drop it. The published document is the
+    fallback for content, and always a floor for the counter.
+    """
     out = {"line": line, "counter": int(counter), "issued-at": issued_at,
            "support-until": support_until}
-    if published is None:
-        return out
-    if published.get("line") != line:
-        raise Refused(f"published document covers line {published.get('line')!r}, not {line!r}")
-    for key in ("known-problems", "yanked", "min-counter"):
-        if key in published:
-            out[key] = published[key]
-    out["counter"] = max(int(counter), int(published["counter"]) + 1)
+    for d, what in ((published, "published document"), (repo, "committed document")):
+        if d is not None and d.get("line") != line:
+            raise Refused(f"{what} covers line {d.get('line')!r}, not {line!r}")
+    source = repo if repo is not None else published
+    if source is not None:
+        for key in ("known-problems", "yanked", "min-counter"):
+            if key in source:
+                out[key] = source[key]
+    if published is not None:
+        out["counter"] = max(int(counter), int(published["counter"]) + 1)
     return out
 
 
 def _load(path: str | None) -> dict | None:
-    if not path:
+    import os
+    if not path or not os.path.exists(path):
         return None
     with open(path) as f:
         text = f.read().strip()
@@ -116,6 +138,7 @@ def main(argv: list[str]) -> int:
     c.add_argument("--counter", type=int, required=True)
     c.add_argument("--issued-at", required=True)
     c.add_argument("--support-until", required=True)
+    c.add_argument("--repo-file", default="")
     a = ap.parse_args(argv)
     try:
         if a.cmd == "plan-publish":
@@ -126,7 +149,8 @@ def main(argv: list[str]) -> int:
         else:
             print(json.dumps(carry_forward(_load(a.published), line=a.line,
                                            counter=a.counter, issued_at=a.issued_at,
-                                           support_until=a.support_until)))
+                                           support_until=a.support_until,
+                                           repo=_load(a.repo_file))))
     except Refused as e:
         print(f"refused: {e}", file=sys.stderr)
         return 1

@@ -209,7 +209,10 @@ jobs:
               RC=$?; [ "$RC" = 3 ] || { echo "::error::the published line-status for $LINE does not verify (exit $RC)"; exit 1; }; }
             jq -r .payload published-status.dsse | base64 -d > published-status.json
           fi
+          # Content from the COMMITTED document when there is one: a registry
+          # that withholds the tag must not make this deposit drop it.
           python3 tools/line-status.py carry-forward --published published-status.json \
+            --repo-file "line-status/$LINE.json" \
             --line "$LINE" --counter "$COUNTER" --issued-at "$ISSUED_AT" \
             --support-until "$SUPPORT_UNTIL" > baseline-status.json
           echo "::notice::baseline for $LAYER carries $(jq '(."known-problems" // []) | length' baseline-status.json) known problem(s) at counter $(jq .counter baseline-status.json)"

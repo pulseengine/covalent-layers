@@ -84,6 +84,28 @@ class PlanPublish(unittest.TestCase):
         self.assertEqual(act, "publish")
         self.assertEqual(out["counter"], 22)
 
+    def test_registry_listing_more_affected_layers_for_the_same_id_refuses(self):
+        wider = dict(KP_ORDEAL, affected=KP_ORDEAL["affected"] + ["2026.09.17"])
+        act, _ = ls.plan_publish(doc(3, [KP_ORDEAL]), doc(27, [wider]),
+                                 newest_baseline=21, issued_at="t")
+        self.assertEqual(act, "registry-has-more")
+
+    def test_registry_with_an_earlier_window_or_higher_floor_refuses(self):
+        act, _ = ls.plan_publish(doc(3, [KP_ORDEAL], support="2026-10-30"),
+                                 doc(27, [KP_ORDEAL], support="2026-10-20"),
+                                 newest_baseline=21, issued_at="t")
+        self.assertEqual(act, "registry-has-more")
+        pub = dict(doc(27, [KP_ORDEAL]), **{"min-counter": 9})
+        act, _ = ls.plan_publish(doc(3, [KP_ORDEAL]), pub, newest_baseline=21,
+                                 issued_at="t")
+        self.assertEqual(act, "registry-has-more")
+
+    def test_the_repo_editing_a_title_is_an_ordinary_publish(self):
+        retitled = dict(KP_ORDEAL, title="ordeal: clearer title")
+        act, _ = ls.plan_publish(doc(3, [retitled]), doc(27, [KP_ORDEAL]),
+                                 newest_baseline=21, issued_at="t")
+        self.assertEqual(act, "publish")
+
     def test_line_mismatch_refuses(self):
         with self.assertRaises(ls.Refused):
             ls.plan_publish(doc(1, [KP_ORDEAL]), doc(5, line="2026.10"),
@@ -114,6 +136,22 @@ class CarryForward(unittest.TestCase):
         out = ls.carry_forward(doc(4, [KP_ORDEAL]), line="2026.09", counter=21,
                                issued_at="t", support_until="s")
         self.assertEqual(out["counter"], 21)
+
+    def test_the_committed_document_is_carried_even_when_the_registry_withholds_it(self):
+        # A registry that hides `line-status-<line>` must not make the next
+        # deposit drop the line's problems: the repository is the approved truth.
+        out = ls.carry_forward(None, line="2026.09", counter=21, issued_at="t",
+                               support_until="s", repo=doc(3, [KP_ORDEAL]))
+        self.assertEqual(out["known-problems"], [KP_ORDEAL])
+        self.assertEqual(out["counter"], 21)
+
+    def test_the_committed_document_wins_over_the_registry_for_content(self):
+        other = dict(KP_ORDEAL, id="GHSA-old")
+        out = ls.carry_forward(doc(25, [other]), line="2026.09", counter=21,
+                               issued_at="t", support_until="s",
+                               repo=doc(3, [KP_ORDEAL]))
+        self.assertEqual(out["known-problems"], [KP_ORDEAL])
+        self.assertEqual(out["counter"], 26)
 
     def test_a_published_document_for_another_line_refuses(self):
         with self.assertRaises(ls.Refused):

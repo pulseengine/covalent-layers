@@ -96,12 +96,27 @@ jobs:
             test "$(jq -r .line "$FILE")" = "$LINE" || {
               echo "::error::$FILE says line $(jq -r .line "$FILE")"; FAILED=1; continue; }
 
+            # Everything read from the registry is VERIFIED against the realm
+            # root before it decides anything. An unverified "published"
+            # document identical to ours would make this a no-op while
+            # consumers reject it — the advisory would never arrive and the
+            # job would be green (found by review, 2026-10-15).
+            verified() {  # $1 = envelope; exit 0 if the realm root signed it
+              mkdir -p vchk && printf 'manifest-version = 1\n[toolchain]\nchannel = "rolling"\nlayer = "%s.0"\n' "$LINE" > vchk/varve.toml
+              ( cd vchk && VARVE_ROOT="$RUNNER_TEMP/v-$LINE-$RANDOM" VARVE_TRUST_ROOT="$GITHUB_WORKSPACE/realm-root.pub" \
+                  "$GITHUB_WORKSPACE/.varve/bin/varve" status --from-file "$GITHUB_WORKSPACE/$1" > /dev/null 2>&1 )
+              local rc=$?; [ "$rc" = 0 ] || [ "$rc" = 3 ]
+            }
             : > published.json
             if grep -qx "line-status-$LINE" tags.txt; then
               oras manifest fetch "$REPO:line-status-$LINE" > pm.json
               D=$(jq -r '[.layers[]|select(.annotations["eu.pulseengine.varve.role"]=="line-status")][0].digest' pm.json)
               oras blob fetch --output published.dsse "$REPO@$D"
-              jq -r .payload published.dsse | base64 -d > published.json
+              if verified published.dsse; then
+                jq -r .payload published.dsse | base64 -d > published.json
+              else
+                echo "::warning::$LINE: the published line-status does not verify against the realm root; treating it as absent and publishing the repository's"
+              fi
             fi
 
             # The newest deposited layer's baseline counter: a document below
@@ -113,6 +128,9 @@ jobs:
               BD=$(jq -r '[.layers[]|select(.annotations["eu.pulseengine.varve.role"]=="line-status")][0].digest // empty' lm.json)
               if [ -n "$BD" ]; then
                 oras blob fetch --output base.dsse "$REPO@$BD"
+                verified base.dsse || {
+                  echo "::error::$LINE: the baseline of $NEWEST does not verify against the realm root; refusing to derive a counter from it"
+                  FAILED=1; continue; }
                 BASE=$(jq -r .payload base.dsse | base64 -d | jq -r .counter)
               fi
             fi
