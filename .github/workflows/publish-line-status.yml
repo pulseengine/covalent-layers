@@ -1,0 +1,170 @@
+name: Publish line-status from the repository
+# The committed `line-status/<line>.json` IS the line's statement about its
+# published layers — known problems, yanks, a corrected support window. A
+# merge is the approval; this job makes the registry serve exactly that, and
+# can do it again at any time (tools/line-status.py, varve REQ-ADVISORYWATCH-001).
+#
+#   * a document the registry lacks or says less than — PUBLISHED, which is
+#     also how a lost document is re-created;
+#   * a document the registry already serves — nothing happens;
+#   * a registry that says MORE than the repository — the job fails and
+#     publishes nothing: someone published out of band, and overwriting
+#     would silently drop what they said.
+#
+# The counter is computed here, above both the published document and every
+# deposited baseline, because deposits keep raising it and a reviewed number
+# would be stale by the time it merged.
+
+concurrency:
+  group: publish-line-status
+  cancel-in-progress: false
+
+on:
+  push:
+    branches: [main]
+    paths: ['line-status/*.json']
+  # Re-create anything the registry lost, without anyone asking.
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Install oras
+        uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2.0.2
+
+      - name: Read the pins out of layer.toml
+        id: pins
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+          d = tomllib.load(open("layer.toml", "rb"))
+          registry = d["realm"]["registry"]
+          assert registry.startswith("oci://"), registry
+          print(f"varve={d['varve']['version']}")
+          print(f"repo={registry.removeprefix('oci://')}")
+          PY
+
+      - name: Fetch and verify the pinned varve release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ steps.pins.outputs.varve }}
+        run: |
+          set -euo pipefail
+          mkdir -p .varve/bin
+          gh release download "$VER" --repo pulseengine/varve -D .varve \
+            -p "varve-$VER-x86_64-unknown-linux-gnu.tar.gz" \
+            -p 'rolling.pub' -p 'SHA256SUMS.txt' -p 'SHA256SUMS.txt.cosign.bundle'
+          cd .varve
+          cosign verify-blob \
+            --certificate-identity-regexp 'https://github.com/pulseengine/varve/.github/workflows/release.yml@.*' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --bundle SHA256SUMS.txt.cosign.bundle SHA256SUMS.txt
+          sha256sum --ignore-missing -c SHA256SUMS.txt
+          mkdir -p x && tar xzf "varve-$VER-x86_64-unknown-linux-gnu.tar.gz" -C x
+          install -m 0755 x/varve bin/varve
+          ./bin/varve --version | grep -q '^varve '
+
+      - name: Make the registry serve what the repository says
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VARVE_COVALENT_KEY: ${{ secrets.VARVE_COVALENT_KEY }}
+          REPO: ${{ steps.pins.outputs.repo }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin <<< "$GH_TOKEN"
+          # Listing what exists is how absence is established; a listing that
+          # fails is a refusal, never "nothing is published".
+          oras repo tags "$REPO" > tags.txt
+          FAILED=0
+          for FILE in line-status/*.json; do
+            LINE="$(basename "$FILE" .json)"
+            test "$(jq -r .line "$FILE")" = "$LINE" || {
+              echo "::error::$FILE says line $(jq -r .line "$FILE")"; FAILED=1; continue; }
+
+            : > published.json
+            if grep -qx "line-status-$LINE" tags.txt; then
+              oras manifest fetch "$REPO:line-status-$LINE" > pm.json
+              D=$(jq -r '[.layers[]|select(.annotations["eu.pulseengine.varve.role"]=="line-status")][0].digest' pm.json)
+              oras blob fetch --output published.dsse "$REPO@$D"
+              jq -r .payload published.dsse | base64 -d > published.json
+            fi
+
+            # The newest deposited layer's baseline counter: a document below
+            # it would lose to that baseline for its consumers.
+            NEWEST="$(grep -E "^${LINE//./\\.}\.[0-9]+$" tags.txt | sort -V | tail -1 || true)"
+            BASE=0
+            if [ -n "$NEWEST" ]; then
+              oras manifest fetch "$REPO:$NEWEST" > lm.json
+              BD=$(jq -r '[.layers[]|select(.annotations["eu.pulseengine.varve.role"]=="line-status")][0].digest // empty' lm.json)
+              if [ -n "$BD" ]; then
+                oras blob fetch --output base.dsse "$REPO@$BD"
+                BASE=$(jq -r .payload base.dsse | base64 -d | jq -r .counter)
+              fi
+            fi
+
+            python3 tools/line-status.py plan-publish --file "$FILE" \
+              --published published.json --newest-baseline "$BASE" \
+              --issued-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > plan.json
+            ACTION=$(jq -r .action plan.json)
+            case "$ACTION" in
+              up-to-date) echo "::notice::$LINE: the registry already serves this document"; continue ;;
+              registry-has-more)
+                echo "::error::$LINE: the registry serves a line-status stating things $FILE does not. Someone published out of band — bring the repository up to date rather than overwrite it."
+                FAILED=1; continue ;;
+              publish) ;;
+              *) echo "::error::$LINE: unexpected plan $ACTION"; FAILED=1; continue ;;
+            esac
+            jq .document plan.json > status.json
+            COUNTER=$(jq -r .counter status.json)
+
+            .varve/bin/varve sign-status --file status.json \
+              --key <(printf '%s' "$VARVE_COVALENT_KEY") --key-id covalent-1 \
+              --out status.dsse
+            oras blob push "$REPO" status.dsse
+            D="sha256:$(sha256sum status.dsse | cut -d' ' -f1)"
+            jq -n --arg d "$D" --argjson s "$(stat -c%s status.dsse)" '{
+              schemaVersion: 2,
+              mediaType: "application/vnd.oci.image.manifest.v1+json",
+              artifactType: "application/vnd.pulseengine.varve.line-status.v1+json",
+              config: { mediaType: "application/vnd.oci.empty.v1+json",
+                        digest: "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                        size: 2 },
+              layers: [ { mediaType: "application/json", digest: $d, size: $s,
+                          annotations: {"eu.pulseengine.varve.role": "line-status"} } ]
+            }' > status-manifest.json
+            oras manifest push "$REPO:line-status-$LINE" status-manifest.json
+
+            # Publishing is not the claim; being READABLE is. Read it back
+            # through the tag a consumer resolves and verify it against the
+            # realm's PUBLISHED root, not the key that just signed it.
+            oras manifest fetch "$REPO:line-status-$LINE" > rt.json
+            RD=$(jq -r '[.layers[]|select(.annotations["eu.pulseengine.varve.role"]=="line-status")][0].digest' rt.json)
+            oras blob fetch --output roundtrip.dsse "$REPO@$RD"
+            cmp roundtrip.dsse status.dsse
+            mkdir -p rt && printf 'manifest-version = 1\n[toolchain]\nchannel = "rolling"\nlayer = "%s.0"\n' "$LINE" > rt/varve.toml
+            set +e
+            ( cd rt && VARVE_ROOT="$RUNNER_TEMP/rt-$LINE" VARVE_TRUST_ROOT="$GITHUB_WORKSPACE/realm-root.pub" \
+                "$GITHUB_WORKSPACE/.varve/bin/varve" status --from-file "$GITHUB_WORKSPACE/roundtrip.dsse" )
+            RC=$?
+            set -e
+            case "$RC" in
+              0|3) echo "::notice::$LINE: published at counter $COUNTER and reads back verified" ;;
+              *) echo "::error::$LINE: published document does not verify against the realm root (exit $RC)"; FAILED=1 ;;
+            esac
+          done
+          exit "$FAILED"
