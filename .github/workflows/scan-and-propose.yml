@@ -82,7 +82,7 @@ permissions:
   # pushes to main and no longer dispatches the deposit. It proposes; a person
   # merges; `deposit-on-merge.yml` signs.
   pull-requests: write
-  actions: write
+  # No `actions: write`: nothing here dispatches a workflow any more.
 
 jobs:
   scan:
@@ -115,6 +115,17 @@ jobs:
             -p "varve-$VER-x86_64-unknown-linux-gnu.tar.gz" \
             -p "varve-producer-$VER-x86_64-unknown-linux-gnu.tar.gz" \
             -p "varve-realms.toml"
+          # VERIFIED before a byte is extracted. These binaries run with a token
+          # that can write branches and open pull requests, so an archive that
+          # is not varve's release output must never execute here. Each one
+          # must carry SLSA build provenance from varve's own release.yml; a
+          # swapped asset has none and the step stops (tested both ways on
+          # 2026-10-21: v0.42.0's archive verifies, a forged file returns 404).
+          for a in "varve-$VER-x86_64-unknown-linux-gnu.tar.gz" \
+                   "varve-producer-$VER-x86_64-unknown-linux-gnu.tar.gz"; do
+            gh attestation verify ".varve/$a" --repo pulseengine/varve \
+              --signer-workflow pulseengine/varve/.github/workflows/release.yml
+          done
           mkdir -p .varve/v .varve/p
           tar xzf ".varve/varve-$VER-x86_64-unknown-linux-gnu.tar.gz" -C .varve/v
           tar xzf ".varve/varve-producer-$VER-x86_64-unknown-linux-gnu.tar.gz" -C .varve/p
