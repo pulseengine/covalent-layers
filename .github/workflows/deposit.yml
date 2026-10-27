@@ -185,7 +185,14 @@ jobs:
           LINE="${LAYER%.*}"
           # Derived from the channel's policy, never typed here: a window a
           # human enters each release drifts, and every value looks plausible.
-          SUPPORT_UNTIL="$("$VARVE" support-horizon --channel "$CHANNEL" --issued-at "$ISSUED_AT")"
+          # CAPPED BY THE INCLUDES (varve REQ-COMPOSEWINDOW-001, #254): this
+          # layer promises nothing past what the layers it composes are
+          # themselves supported until, read from each include's signed
+          # line-status. The include realms are resolved from a
+          # varve-realms.toml beside this file, so the release's copy is put
+          # there. A missing or unverifiable include line-status refuses.
+          cp .varve/varve-realms.toml ./varve-realms.toml
+          SUPPORT_UNTIL="$("$VARVE" support-horizon --channel "$CHANNEL" --issued-at "$ISSUED_AT" --manifest layer.toml)"
           echo "::notice::layer $LAYER supported until $SUPPORT_UNTIL ($CHANNEL policy)"
           # CARRY THE LINE'S PUBLISHED STATEMENT FORWARD. This baseline used
           # to say only line/counter/issued-at/support-until, with a counter
