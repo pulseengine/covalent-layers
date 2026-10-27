@@ -51,7 +51,14 @@
 # measurement and the provenance fix change nothing for it. That reasoning was
 # incomplete: it accounted for what the layer CONTAINS and not for what the
 # repository's own tooling runs.
-version = "v0.41.0"
+#
+# v0.43.0, not v0.41.0: this layer's support window can now be CAPPED by what
+# it composes. `varve support-horizon --manifest` (v0.43.0, varve
+# REQ-COMPOSEWINDOW-001) reads each include's signed line-status and stops at
+# the earliest window. This realm is why that exists (varve#254): 2026.10.0
+# signed support to 2026-11-02 while its wasm include was supported to
+# 2026-10-24. deposit.yml now passes this file.
+version = "v0.43.0"
 
 [realm]
 name     = "covalent"
@@ -76,7 +83,15 @@ layer  = "2026.10.30"
 # each travels with the operator's recorded reason inside the signed layer.
 # Composing that realm means accepting those reasons; read them with
 # `varve inspect` before pinning this layer.
+#
+# 2026.10.2, not 2026.09.0, and a LINE change: 2026.09.0's support ended on
+# 2026-10-24, so every layer of this realm deposited after that promised support
+# over bytes their own realm no longer vouched for. Nothing proposed the move
+# because the scanner looks for newer layers on the SAME line, and line 2026.09
+# has none. Measured 2026-10-27: with this include, `support-horizon
+# --manifest` caps this layer at 2026-11-21 (2026.10.2's window); with
+# 2026.09.0 it gave 2026-10-24, already past.
 [[include]]
-digest = "sha256:4bae60c6fa40da216eb2721253d263158d6c5501d3e6c3863b4ce55b6000c9a4"
+digest = "sha256:127b762a03b8f5c5b50ecb8f4827c2bb0249efc334f369f2a8392db1043a9a69"
 realm  = "pulseengine-wasm"
-layer  = "2026.09.0"
+layer  = "2026.10.2"
