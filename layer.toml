@@ -73,9 +73,9 @@ registry = "oci://ghcr.io/pulseengine/covalent-layers"
 # The PulseEngine methodology toolchain — rivet, spar, synth, witness, ordeal,
 # loom, meld, kilnd, wsc, varve-producer, the VS Code extensions and the docs.
 [[include]]
-digest = "sha256:18e9286a2c61267f62d11bf2c3bcddc68198592086db11786eafe2f342127413"
+digest = "sha256:f6bb7788f247c534c16d7d5d0c466c44f05a6d470f277dde79a05b05c54279ae"
 realm  = "pulseengine"
-layer  = "2026.10.30"
+layer  = "2026.10.31"
 
 # The component-model tools from bytecodealliance, vouched for by PulseEngine.
 # THREE OF ITS FOUR PAYLOADS CARRY NO PROOF OF ORIGIN — wac, wkg and
@@ -92,6 +92,6 @@ layer  = "2026.10.30"
 # --manifest` caps this layer at 2026-11-21 (2026.10.2's window); with
 # 2026.09.0 it gave 2026-10-24, already past.
 [[include]]
-digest = "sha256:127b762a03b8f5c5b50ecb8f4827c2bb0249efc334f369f2a8392db1043a9a69"
+digest = "sha256:20bbd8f90382719c7f5a219b2db3fa6fe610ceb111aa234f37748023ed1ade9b"
 realm  = "pulseengine-wasm"
-layer  = "2026.10.2"
+layer  = "2026.10.4"
