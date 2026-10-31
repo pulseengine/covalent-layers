@@ -92,6 +92,6 @@ layer  = "2026.10.35"
 # --manifest` caps this layer at 2026-11-21 (2026.10.2's window); with
 # 2026.09.0 it gave 2026-10-24, already past.
 [[include]]
-digest = "sha256:1004847dd1f4bd3b94891d2d3eea706ed02d9fc1ab3ee37338ed7933a9ebe64c"
+digest = "sha256:3ea2709151d5d3c4f83c74b793e8fe1334c3f54833693cc025abf05be6b7f7e9"
 realm  = "pulseengine-wasm"
-layer  = "2026.10.5"
+layer  = "2026.10.6"
