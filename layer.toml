@@ -62,7 +62,14 @@
 # an exact match arrives under an alias or in a later run, and `varve verify
 # --export` re-hashes the exported tree. Measured 2026-11-04: the v0.44.0
 # `plan` accepts this file with only the version line changed.
-version = "v0.44.0"
+# v0.45.0, not v0.44.0: a realm's declared mirrors are used, as transport
+# and never authority: first contact with a line needs the primary, and a
+# verified refusal from the primary is final (varve REQ-MIRROR-002). A realm
+# may split its signing key by role (REQ-KEYROLES-001); this realm declares
+# no roles, so it is unchanged. varve-serve says when a harvest could not
+# finish instead of caching it as "no help". Measured 2026-11-06: the
+# v0.45.0 `plan` accepts this file with only the version line changed.
+version = "v0.45.0"
 
 [realm]
 name     = "covalent"
