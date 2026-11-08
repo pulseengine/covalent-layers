@@ -69,7 +69,10 @@
 # no roles, so it is unchanged. varve-serve says when a harvest could not
 # finish instead of caching it as "no help". Measured 2026-11-06: the
 # v0.45.0 `plan` accepts this file with only the version line changed.
-version = "v0.45.0"
+# v0.46.0, not v0.45.0: VARVE_REGISTRY_AUTH goes only to the pinned realm's
+# registry origin, a mirror cannot pass against less than the primary proved
+# earlier in the same run, and the producer reads back what it writes.
+version = "v0.46.0"
 
 [realm]
 name     = "covalent"
@@ -83,10 +86,16 @@ registry = "oci://ghcr.io/pulseengine/covalent-layers"
 
 # The PulseEngine methodology toolchain — rivet, spar, synth, witness, ordeal,
 # loom, meld, kilnd, wsc, varve-producer, the VS Code extensions and the docs.
+#
+# 2026.11.7, not 2026.10.35, and a LINE change: line 2026.10's support ended on
+# 2026-11-01, and 2026.10.35 was its last layer, so the scanner (which looks
+# for newer layers on the SAME line) proposed nothing (varve#343). The id and
+# digest are the newest of line 2026.11 as varve 0.46.0's `outdated` reads it
+# from the realm's SIGNED line index (counter 8), 2026-11-08.
 [[include]]
-digest = "sha256:c00162ed1bae1cd17a1eaaea04fefaeddfcf49859c3c6fa28ac0958ec3a8fd13"
+digest = "sha256:0c0d230930c26d3d897a901c28061694d4ba739a8b20b528b3df74c222e68318"
 realm  = "pulseengine"
-layer  = "2026.10.35"
+layer  = "2026.11.7"
 
 # The component-model tools from bytecodealliance, vouched for by PulseEngine.
 # THREE OF ITS FOUR PAYLOADS CARRY NO PROOF OF ORIGIN — wac, wkg and
@@ -102,7 +111,11 @@ layer  = "2026.10.35"
 # has none. Measured 2026-10-27: with this include, `support-horizon
 # --manifest` caps this layer at 2026-11-21 (2026.10.2's window); with
 # 2026.09.0 it gave 2026-10-24, already past.
+#
+# 2026.11.1, not 2026.10.6, the same kind of LINE change: line 2026.10's
+# support ends on 2026-11-08 and 2026.10.6 was its last layer. Read from the
+# realm's signed line 2026.11 index (counter 2) by varve 0.46.0, 2026-11-08.
 [[include]]
-digest = "sha256:3ea2709151d5d3c4f83c74b793e8fe1334c3f54833693cc025abf05be6b7f7e9"
+digest = "sha256:145b0d2a4cc6a29bc28ac9b5afa7cabe973b34e9e3741f814b91c6694fc8aea1"
 realm  = "pulseengine-wasm"
-layer  = "2026.10.6"
+layer  = "2026.11.1"
