@@ -93,9 +93,9 @@ registry = "oci://ghcr.io/pulseengine/covalent-layers"
 # digest are the newest of line 2026.11 as varve 0.46.0's `outdated` reads it
 # from the realm's SIGNED line index (counter 8), 2026-11-08.
 [[include]]
-digest = "sha256:9c923f1376d5edcfa9a00bc4455f075587460fcad9d2ea1835b425916acd0a0c"
+digest = "sha256:b026ddd9c365525ba945949f203d58daae7d8afe22885abe52e0ab4e3088150a"
 realm  = "pulseengine"
-layer  = "2026.11.9"
+layer  = "2026.11.10"
 
 # The component-model tools from bytecodealliance, vouched for by PulseEngine.
 # THREE OF ITS FOUR PAYLOADS CARRY NO PROOF OF ORIGIN — wac, wkg and
