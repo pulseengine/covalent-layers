@@ -77,12 +77,10 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  # To OPEN the proposal. Note what is ABSENT now: this workflow no longer
-  # pushes to main and no longer dispatches the deposit. It proposes; a person
-  # merges; `deposit-on-merge.yml` signs.
-  pull-requests: write
-  # No `actions: write`: nothing here dispatches a workflow any more.
+  # Read-only for github.token (checkout, release downloads). The writes that
+  # open the proposal use the App token minted in the `propose it` job step,
+  # which carries its own contents and pull-requests write.
+  contents: read
 
 jobs:
   scan:
@@ -215,10 +213,28 @@ jobs:
       # decides whose bytes this realm vouches for. A pull request IS that
       # review. What was wrong before was equating "reviewed" with "typed by
       # hand" (varve REQ-PREPARED-001).
+      # The App token, not github.token. A PR opened with the default token
+      # starts no `check` run (a run with zero jobs), so `check` could never be
+      # required. The token is scoped to this repository (the action's default
+      # when no owner or repositories are given) and to the two permissions
+      # opening a PR needs. No continue-on-error: if the mint fails, so does
+      # the job. `app-id` is deprecated for `client-id`, but the secret holds
+      # the app id, so the two must change together (see relay's
+      # pr-branch-keeper.yml).
+      - name: Mint the App token
+        id: apptoken
+        if: steps.scan.outputs.moved == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.ACTIONS_BOT_APP_ID }}
+          private-key: ${{ secrets.ACTIONS_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
       - name: propose it
         if: steps.scan.outputs.moved == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.apptoken.outputs.token }}
         run: |
           set -euo pipefail
           BRANCH="scanner/pins-$(date -u +%Y%m%d-%H%M%S)"
@@ -226,7 +242,7 @@ jobs:
           # A SIGNED commit, made by GitHub. Covalent's main requires
           # signatures, and a `git commit` on the runner is unsigned — the
           # first proposal (#19) could not be merged for exactly that reason.
-          # `createCommitOnBranch` with the workflow token yields a commit
+          # `createCommitOnBranch` with the App token yields a commit
           # GitHub signs; checked below rather than assumed.
           BASE="$(git rev-parse HEAD)"
           gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$BASE" > /dev/null
@@ -252,7 +268,11 @@ jobs:
           # Reuse an open proposal rather than stacking one per tick: the
           # scanner runs on a schedule and an unreviewed queue of near-identical
           # PRs is how a review step stops being a review.
-          EXISTING="$(gh pr list --state open --search 'head:scanner/pins- in:title Pins moved upstream' --json number --jq '.[0].number // empty')"
+          # Only a same-repository PR from a bot on a scanner branch counts. A
+          # fork PR can carry any branch name or title, and must never be
+          # closed by this job.
+          EXISTING="$(gh pr list --state open --limit 100 --json number,headRefName,isCrossRepository,author \
+            --jq '[.[] | select(.isCrossRepository == false and .author.is_bot == true and (.headRefName | startswith("scanner/pins-")))][0].number // empty')"
           if [ -n "$EXISTING" ]; then
             echo "::notice::#$EXISTING is already proposing a pin move; closing it in favour of this one"
             gh pr close "$EXISTING" --comment "Superseded by a newer scan." || true

@@ -1,0 +1,42 @@
+name: app-token-probe
+
+# Proves, in CI, that the org GitHub App is installed on this repository and
+# that the org secrets are visible to it. scan-and-propose.yml and deposit.yml
+# open their PRs with an App installation token so that `check` runs on them;
+# if the App is not installed here, those workflows fail at the mint step.
+#
+# Deliberately NOT a job inside check.yml. Dependabot and fork PRs get no org
+# secrets, and `check` is meant to become a required status check, so a probe
+# inside it would block them. Those PRs skip this job instead of failing it.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  probe:
+    name: the App token can be minted here
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.actor != 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Read-only: metadata is all `/installation/repositories` needs. No
+      # continue-on-error: a failed mint is the finding. `app-id` is deprecated
+      # for `client-id`, but the secret holds the app id (see relay's
+      # pr-branch-keeper.yml).
+      - name: Mint a read-only App token
+        id: apptoken
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.ACTIONS_BOT_APP_ID }}
+          private-key: ${{ secrets.ACTIONS_BOT_PRIVATE_KEY }}
+          permission-metadata: read
+
+      - name: Print the repositories this installation can reach
+        env:
+          GH_TOKEN: ${{ steps.apptoken.outputs.token }}
+        run: gh api /installation/repositories --jq '.repositories[].full_name'
