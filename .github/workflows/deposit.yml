@@ -35,6 +35,11 @@ on:
         required: true
         type: string
 
+# github.token needs only to read the checkout and push to ghcr. Proposing the
+# line index as a signed pull request uses the App token minted in the propose
+# step, so that `check` runs on that PR. main requires a PR and signed commits,
+# so the deposit cannot push the index itself; merging the PR publishes it
+# (publish-line-index.yml, varve DD-027).
 permissions:
   contents: read
   packages: write
@@ -470,6 +475,98 @@ jobs:
             # 4. Push the manifest under the layer tag.
             oras manifest push "$REPO:$LAYER" artifact-manifest.json
           fi
+
+      # WITHOUT THIS, NOTHING CAN ASK WHAT THIS REALM HAS PUBLISHED.
+      #
+      # varve answers "is there a newer layer?" from a realm's SIGNED index and
+      # from nothing else. A registry tag listing would answer faster and is
+      # refused: a host that hides a layer serves nothing that fails
+      # verification, so a listing cannot tell "there is nothing newer" from
+      # "I am not telling you".
+      #
+      # This realm had no index, so `varve outdated` answered "cannot answer"
+      # for every pin against covalent, which by 2026-11-14 was every realm pin
+      # in the org. Ported from wasm-layers (#21), unchanged: the payload
+      # digest is read from the layout the same way the publish step above
+      # reads it, so a composition's edges are never mistaken for its payload.
+      # The App token, not github.token. A PR opened with the default token
+      # starts no `check` run (a run with zero jobs), so `check` could never be
+      # required. The token is scoped to this repository (the action's default
+      # when no owner or repositories are given) and to the two permissions
+      # opening a PR needs. No continue-on-error: if the mint fails, so does
+      # the job. `app-id` is deprecated for `client-id`, but the secret holds
+      # the app id, so the two must change together (see relay's
+      # pr-branch-keeper.yml).
+      - name: Mint the App token
+        id: apptoken
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.ACTIONS_BOT_APP_ID }}
+          private-key: ${{ secrets.ACTIONS_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Propose this layer for the line index, as a signed pull request
+        env:
+          GH_TOKEN: ${{ steps.apptoken.outputs.token }}
+          LAYER: ${{ inputs.layer }}
+          COUNTER: ${{ inputs.counter }}
+          CHANNEL: ${{ steps.pins.outputs.channel }}
+          REPO: ${{ steps.pins.outputs.repo }}
+        run: |
+          set -euo pipefail
+          VARVE=.varve/bin/varve
+          LINE="${LAYER%.*}"
+          DOC="line-index/$LINE.json"
+          ISSUED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          # The PAYLOAD digest — what a pin's `digest` names and what an index
+          # entry must carry, so a consumer can compare an entry with a pin
+          # directly. Re-read from the layout rather than passed down, so this
+          # step cannot be given a digest belonging to another layer.
+          SIG_TYPE='application/vnd.pulseengine.varve.signature.v1+json'
+          STATUS_TYPE='application/vnd.pulseengine.varve.line-status.v1+json'
+          PAYLOAD_DIGEST=$(jq -r --arg t "$SIG_TYPE" --arg s "$STATUS_TYPE" \
+            '[.manifests[] | select(.artifactType != $t and .artifactType != $s)][0].digest' \
+            layer-layout/index.json)
+          test -n "$PAYLOAD_DIGEST" || { echo "::error::no payload digest in the layout"; exit 1; }
+
+          python3 tools/append-index.py --file "$DOC" \
+            --layer "$LAYER" --digest "$PAYLOAD_DIGEST" \
+            --channel "$CHANNEL" --counter "$COUNTER" --issued-at "$ISSUED_AT"
+
+          if git diff --quiet -- "$DOC" && [ -z "$(git status --porcelain -- "$DOC")" ]; then
+            echo "::notice::$DOC already names $LAYER — nothing to propose"
+            exit 0
+          fi
+          # PROPOSE, never push. main requires a pull request AND signed
+          # commits; pushing the index straight to main is what failed the
+          # 2026.10.1 deposit (GH013) after its layer was already published.
+          # createCommitOnBranch with the App token yields a commit GitHub
+          # signs — checked below, not assumed. Merging the PR publishes the
+          # signed index (publish-line-index.yml).
+          BRANCH="line-index/$LAYER"
+          BASE="$(git rev-parse HEAD)"
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$BASE" > /dev/null
+          jq -n \
+            --arg repo "$GITHUB_REPOSITORY" --arg branch "$BRANCH" --arg oid "$BASE" \
+            --arg head "Line $LINE index names $LAYER" \
+            --arg body "Appended by the deposit that pushed $LAYER. The list is committed here and never read from the registry: an index derived from the listing it is meant to check would agree with a registry that hides a layer (varve DD-027)." \
+            --arg path "$DOC" --arg contents "$(base64 -w0 "$DOC")" \
+            '{query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
+              variables: {input: {
+                branch: {repositoryNameWithOwner: $repo, branchName: $branch},
+                expectedHeadOid: $oid,
+                message: {headline: $head, body: $body},
+                fileChanges: {additions: [{path: $path, contents: $contents}]}}}}' \
+            | gh api graphql --input - > index-commit.json
+          OID="$(jq -r '.data.createCommitOnBranch.commit.oid' index-commit.json)"
+          test -n "$OID" && test "$OID" != null || { cat index-commit.json; exit 1; }
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$OID" --jq '.commit.verification.verified')" = true || {
+            echo "::error::the index commit $OID is not signed; main would refuse it"; exit 1; }
+          PR_BODY="$(printf 'The deposit of **%s** published the layer; this adds it to the committed line index for **%s** (`%s`, index #%s).\n\n**Merging this publishes the signed index** (publish-line-index.yml), which is what lets `varve outdated` tell consumers that %s exists, and lets them notice a registry that hides it (varve DD-027).' "$LAYER" "$LINE" "$DOC" "$(jq .counter "$DOC")" "$LAYER")"
+          gh pr create --head "$BRANCH" --title "Line $LINE index names $LAYER" --body "$PR_BODY"
+          echo "::notice::proposed $DOC naming $LAYER — merge to publish the signed index"
 
       - name: Upload the oci-layout (artifact of record)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

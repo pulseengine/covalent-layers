@@ -1,0 +1,73 @@
+{
+  "line": "2026.11",
+  "counter": 11,
+  "issued-at": "2026-11-14T12:50:59Z",
+  "layers": [
+    {
+      "layer": "2026.11.0",
+      "digest": "sha256:dac0ffe83dd5c9329eee0ffb08178ce79219972bfdde12f8e85a187517591efd",
+      "channel": "rolling",
+      "counter": 1
+    },
+    {
+      "layer": "2026.11.1",
+      "digest": "sha256:3d7db8f10601a680dde55a0309d2e2ee611aedaecef19e5f474ccf07a414d315",
+      "channel": "rolling",
+      "counter": 2
+    },
+    {
+      "layer": "2026.11.2",
+      "digest": "sha256:0bcba8190d62e543db050bf100d4f4b1f8ec17ee20ada486e02ae2582be437cb",
+      "channel": "rolling",
+      "counter": 3
+    },
+    {
+      "layer": "2026.11.3",
+      "digest": "sha256:bc8f95dc7f54593fc501e4cbcc9d56c1983a32869fa8f1b944c85181c32c561b",
+      "channel": "rolling",
+      "counter": 4
+    },
+    {
+      "layer": "2026.11.4",
+      "digest": "sha256:88fe33df94f227901bb5d1296d0f9bd618de59bca416e50934181dc4ba8ce81a",
+      "channel": "rolling",
+      "counter": 5
+    },
+    {
+      "layer": "2026.11.5",
+      "digest": "sha256:88bcf6366b5c046328c0c4a5d05801430dd8a526f72002a953cb3cde535af8c5",
+      "channel": "rolling",
+      "counter": 6
+    },
+    {
+      "layer": "2026.11.6",
+      "digest": "sha256:6c18245206b3bd2b5f48812724eef20d3be6cfd1910a61de62e42900a75fa2be",
+      "channel": "rolling",
+      "counter": 7
+    },
+    {
+      "layer": "2026.11.7",
+      "digest": "sha256:ba7bd8910ced7ace594566941aeb870d78114670f04e489661c6e8b3cc2b9cc0",
+      "channel": "rolling",
+      "counter": 8
+    },
+    {
+      "layer": "2026.11.8",
+      "digest": "sha256:1f3d4a2bab66a4ff7161261e647f497f4f31bcca8915e181ec1352edf870f366",
+      "channel": "rolling",
+      "counter": 9
+    },
+    {
+      "layer": "2026.11.9",
+      "digest": "sha256:2e66be39e7800193a38e1cc6f1dd853bd7471daa487412b9250c8e639b799c79",
+      "channel": "rolling",
+      "counter": 10
+    },
+    {
+      "layer": "2026.11.10",
+      "digest": "sha256:748093c061982c10b98e80cbb9a26d135e4f95d504bd47b6b63f5003012f421a",
+      "channel": "rolling",
+      "counter": 11
+    }
+  ]
+}
