@@ -94,11 +94,17 @@ jobs:
           # the realm (registry + trust root from varve-realms.toml) and verifies
           # it. Its answer, not the raw blob, decides whether a published index
           # counts — an unverifiable one is treated as absent.
+          # The probe reads with THIS repository's varve-realms.toml, the file a
+          # covalent consumer carries: no varve release defines the covalent
+          # realm (v0.46.0 and v0.47.0 ship pulseengine and pulseengine-wasm
+          # only), so the release's copy cannot resolve it and every read-back
+          # failed. A probe that cannot answer prints nothing, so the caller
+          # reports it, rather than set -e ending the step silently.
           served() {  # $1 = line, $2 = a layer of it; prints the verified index counter or nothing
-            mkdir -p probe && cp .varve/varve-realms.toml probe/
+            mkdir -p probe && cp varve-realms.toml probe/
             printf 'manifest-version = 1\n[toolchain]\nrealm = "%s"\nchannel = "%s"\nlayer = "%s"\n' "$REALM" "$CHANNEL" "$2" > probe/varve.toml
             ( cd probe && VARVE_ROOT="$RUNNER_TEMP/probe-$1-$RANDOM" "$VARVE" outdated --json 2>/dev/null ) \
-              | jq -r 'select(.answerable == true) | .index_counter // empty'
+              | jq -r 'select(.answerable == true) | .index_counter // empty' || true
           }
           for FILE in line-index/*.json; do
             LINE="$(basename "$FILE" .json)"
