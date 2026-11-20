@@ -116,6 +116,6 @@ layer  = "2026.11.28"
 # support ends on 2026-11-08 and 2026.10.6 was its last layer. Read from the
 # realm's signed line 2026.11 index (counter 2) by varve 0.46.0, 2026-11-08.
 [[include]]
-digest = "sha256:42b6934ba1cfd3af553d11b14550f341e02c33132a022218f8c77adc19151ebc"
+digest = "sha256:8251350362ba62c2f1b4e4b67966d11d7399275d8327e0e40113b8a216e47421"
 realm  = "pulseengine-wasm"
-layer  = "2026.11.4"
+layer  = "2026.11.5"
