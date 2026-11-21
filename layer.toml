@@ -93,9 +93,9 @@ registry = "oci://ghcr.io/pulseengine/covalent-layers"
 # digest are the newest of line 2026.11 as varve 0.46.0's `outdated` reads it
 # from the realm's SIGNED line index (counter 8), 2026-11-08.
 [[include]]
-digest = "sha256:38c4c10e07d401c2321097c18e8446ee3e2aa5929a4979b88beaf991d8edfa9d"
+digest = "sha256:a709c3acf3472f1c2bd52509632021cb1cfd62a0158838e07a37beab034f3dd3"
 realm  = "pulseengine"
-layer  = "2026.11.28"
+layer  = "2026.11.29"
 
 # The component-model tools from bytecodealliance, vouched for by PulseEngine.
 # THREE OF ITS FOUR PAYLOADS CARRY NO PROOF OF ORIGIN — wac, wkg and
@@ -116,6 +116,6 @@ layer  = "2026.11.28"
 # support ends on 2026-11-08 and 2026.10.6 was its last layer. Read from the
 # realm's signed line 2026.11 index (counter 2) by varve 0.46.0, 2026-11-08.
 [[include]]
-digest = "sha256:8251350362ba62c2f1b4e4b67966d11d7399275d8327e0e40113b8a216e47421"
+digest = "sha256:0d699621e8a126343a354991bc6c28e8756cde0dcaae385467bf7f754bbc0cca"
 realm  = "pulseengine-wasm"
-layer  = "2026.11.5"
+layer  = "2026.11.6"
