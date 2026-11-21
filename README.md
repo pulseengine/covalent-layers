@@ -17,11 +17,19 @@ manifest-version = 1
 [toolchain]
 realm   = "covalent"
 channel = "rolling"
-layer   = "2026.09.0"
+layer   = "2026.11.20"   # an example; pin the newest, see below
 ```
 
 `varve install` then walks the composition and fetches each included layer
 from **its own realm's registry**, verified against **its own realm's root**.
+
+**Which layer to pin.** The layer above is only an example, and it ages. The
+realm's own list is [`line-index/`](line-index/): one file per line
+(`<line>.json`), and the **last** entry in the newest line's file is the
+newest layer, with its digest. In a project that already pins a covalent
+layer, `varve outdated` reads the same list from the realm's signed index and
+names anything newer. `varve status` says whether the pinned layer is still
+inside its support window.
 
 ## What it composes
 
