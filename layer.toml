@@ -85,17 +85,23 @@ registry = "oci://ghcr.io/pulseengine/covalent-layers"
 # an include exists to prevent.
 
 # The PulseEngine methodology toolchain — rivet, spar, synth, witness, ordeal,
-# loom, meld, kilnd, wsc, varve-producer, the VS Code extensions and the docs.
+# loom, meld, kiln, wsc, varve-producer, the VS Code extensions and the docs.
 #
 # 2026.11.7, not 2026.10.35, and a LINE change: line 2026.10's support ended on
 # 2026-11-01, and 2026.10.35 was its last layer, so the scanner (which looks
 # for newer layers on the SAME line) proposed nothing (varve#343). The id and
 # digest are the newest of line 2026.11 as varve 0.46.0's `outdated` reads it
 # from the realm's SIGNED line index (counter 8), 2026-11-08.
+#
+# 2026.11.42 (counter 43): kiln v0.9.0 (the `kiln` binary only; `kilnd` is
+# gone), sieve v0.4.3, plant v0.5.0. The digest is the one `varve install`
+# prints for that layer, verified 2026-11-25 (signature OK, 20 tools match).
+# Set by hand ahead of the scanner: the signed index naming it is
+# pulseengine-layers#106.
 [[include]]
-digest = "sha256:18dd29cde4a6012794ecd3acd931504f1bfbff97b50e7ed18d1f4cb1bcfd9964"
+digest = "sha256:ad9b57717c1a8d2375cd8b92beb0fd376e805a9a936e2b027e9a5be351915fc7"
 realm  = "pulseengine"
-layer  = "2026.11.40"
+layer  = "2026.11.42"
 
 # The component-model tools from bytecodealliance, vouched for by PulseEngine.
 # THREE OF ITS FOUR PAYLOADS CARRY NO PROOF OF ORIGIN — wac, wkg and
