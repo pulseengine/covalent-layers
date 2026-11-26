@@ -99,9 +99,9 @@ registry = "oci://ghcr.io/pulseengine/covalent-layers"
 # Set by hand ahead of the scanner: the signed index naming it is
 # pulseengine-layers#106.
 [[include]]
-digest = "sha256:ad9b57717c1a8d2375cd8b92beb0fd376e805a9a936e2b027e9a5be351915fc7"
+digest = "sha256:73d5486ed887e0a62319a3e8c1bb823119e8e1e2e6ffbe543af4d653e01bad5e"
 realm  = "pulseengine"
-layer  = "2026.11.42"
+layer  = "2026.11.44"
 
 # The component-model tools from bytecodealliance, vouched for by PulseEngine.
 # THREE OF ITS FOUR PAYLOADS CARRY NO PROOF OF ORIGIN — wac, wkg and
